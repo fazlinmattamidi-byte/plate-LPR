@@ -22,7 +22,7 @@ export interface ConsensusResult {
 export function evaluateConsensus(
   track: ActiveTrack,
   minRequiredVotes: number = 3,
-  minConfidenceThreshold: number = 0.65
+  minConfidenceThreshold: number = 0.60
 ): ConsensusResult {
   if (!track.votes || track.votes.size === 0) {
     return {
@@ -74,18 +74,22 @@ export function evaluateConsensus(
 
 /**
  * Adds an OCR result as a vote to a specific track's isolated vote map.
+ * Incorporates crop quality weight to prioritize crisp frames.
  */
 export function addOcrVoteToTrack(
   track: ActiveTrack,
   ocrText: string,
-  confidence: number
+  confidence: number,
+  qualityWeight: number = 1.0
 ): void {
   const norm = normalizePlate(ocrText);
   if (!norm || norm.length < 2) return;
 
+  const weightedConfidence = confidence * Math.max(0.5, qualityWeight);
+
   const current = track.votes.get(norm) || { count: 0, totalConfidence: 0 };
   current.count += 1;
-  current.totalConfidence += confidence;
+  current.totalConfidence += weightedConfidence;
   track.votes.set(norm, current);
 }
 

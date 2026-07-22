@@ -8,33 +8,30 @@ import {
   ZapOff,
   AlertOctagon,
   AlertTriangle,
-  CheckCircle2,
   Pause,
   Play,
   Settings as SettingsIcon,
   ChevronDown,
   ChevronUp,
-  X,
-  Copy,
 } from 'lucide-react';
 import Link from 'next/link';
-import { BottomNav } from '@/components/layout/BottomNav';
-import { PlateTracker, ActiveTrack, BoundingBox } from '@/lib/anpr/tracker';
+import { PlateTracker, ActiveTrack } from '@/lib/anpr/tracker';
 import {
-  detectPlatesFullFrame,
+  detectMalaysianPlates,
+  initLocalOnnxSession,
+  DetectedPlateBox,
+} from '@/lib/anpr/yoloDetector';
+import {
+  generateAdaptiveCrops,
   cropCanvasRegion,
-  calculateCropQualityScore,
 } from '@/lib/anpr/imageProcessor';
+import { globalBestFrameSelector } from '@/lib/anpr/bestFrameSelector';
 import { recognizePlateFromCanvas } from '@/lib/anpr/ocrEngine';
 import { addOcrVoteToTrack, evaluateConsensus, getTrackReadingDisplay } from '@/lib/anpr/consensus';
-import { normalizePlate } from '@/lib/anpr/normaliser';
 import { playAlertSound, triggerVibration } from '@/lib/utils/audio';
 import { VehicleCase, ScannerSettings } from '@/lib/db/types';
 import { INITIAL_SETTINGS } from '@/lib/db/settingsDefaults';
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
+import { ModelStatusBanner } from '@/components/scanner/ModelStatusBanner';
 
 interface MatchEntry {
   type: 'EXACT' | 'POSSIBLE';
@@ -48,9 +45,6 @@ interface MatchEntry {
   dismissed: boolean;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Colour helpers for track overlay
-// ─────────────────────────────────────────────────────────────────────────────
 function getTrackColor(track: ActiveTrack): string {
   if (track.matchType === 'EXACT') return '#ef4444';   // red
   if (track.matchType === 'POSSIBLE') return '#f59e0b'; // amber
@@ -74,14 +68,10 @@ function getTrackStatusLabel(track: ActiveTrack): string {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main Scanner Component
-// ─────────────────────────────────────────────────────────────────────────────
-
 export default function ScannerPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const trackerRef = useRef<PlateTracker>(new PlateTracker(15));
+  const trackerRef = useRef<PlateTracker>(new PlateTracker(20, 8));
   const streamRef = useRef<MediaStream | null>(null);
 
   // Camera state
@@ -96,11 +86,15 @@ export default function ScannerPage() {
   const isPausedRef = useRef<boolean>(false);
   const [isPaused, setIsPaused] = useState(false);
 
+  // Detector engine state
+  const [activeEngine, setActiveEngine] = useState<'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC'>('ROBOFLOW_API');
+  const [avgConfidence, setAvgConfidence] = useState<number>(0.85);
+
   // Performance metrics
   const [camFps, setCamFps] = useState(0);
   const [detFps, setDetFps] = useState(0);
   const [platesVisible, setPlatesVisible] = useState(0);
-  const [activeTracks, setActiveTracks] = useState(0);
+  const [activeTracksCount, setActiveTracksCount] = useState(0);
 
   // Active tracks for results tray
   const [tracksList, setTracksList] = useState<ActiveTrack[]>([]);
@@ -110,27 +104,33 @@ export default function ScannerPage() {
   const [matchQueue, setMatchQueue] = useState<MatchEntry[]>([]);
   const [viewingMatch, setViewingMatch] = useState<MatchEntry | null>(null);
 
-  // Settings (loaded from API)
+  // Settings
   const settingsRef = useRef<ScannerSettings>({ ...INITIAL_SETTINGS });
 
-  // Refs for performance-critical loop data (no re-render on change)
   const camFrameCount = useRef(0);
   const detFrameCount = useRef(0);
   const lastFpsTs = useRef(Date.now());
   const cooldownMap = useRef<Map<string, number>>(new Map());
   const activeOcrCount = useRef(0);
 
-  // ─── 1. Load Settings ───────────────────────────────────────────────────
+  // ─── 1. Load Settings & Check ONNX Model ───────────────────────────
   useEffect(() => {
     fetch('/api/settings')
       .then(r => r.json())
       .then(data => {
         if (data.success && data.settings) {
           settingsRef.current = { ...settingsRef.current, ...data.settings };
-          trackerRef.current.setLostTrackTimeout(data.settings.lostTrackTimeout ?? 15);
+          trackerRef.current.setLostTrackTimeout(data.settings.lostTrackTimeout ?? 20);
         }
       })
       .catch(() => {});
+
+    // Try initializing local ONNX session
+    initLocalOnnxSession().then(hasOnnx => {
+      if (hasOnnx) {
+        setActiveEngine('LOCAL_ONNX');
+      }
+    });
   }, []);
 
   // ─── 2. Initialise Camera ────────────────────────────────────────────────
@@ -227,7 +227,7 @@ export default function ScannerPage() {
     const now = Date.now();
     const lastSearch = cooldownMap.current.get(plate) ?? 0;
 
-    if (now - lastSearch < cooldownMs) return; // Duplicate suppression per-plate
+    if (now - lastSearch < cooldownMs) return;
     cooldownMap.current.set(plate, now);
 
     track.ocrState = 'DB_CHECKING';
@@ -241,7 +241,6 @@ export default function ScannerPage() {
 
       if (!searchRes.success) return;
 
-      // Log scan event (each plate gets its own ScanEvent)
       const scanRes = await fetch('/api/scans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -261,14 +260,12 @@ export default function ScannerPage() {
       track.matchType = searchRes.matchType === 'EXACT' ? 'EXACT' : searchRes.matchType === 'POSSIBLE' ? 'POSSIBLE' : 'NONE';
       track.matchedVehicle = searchRes.matchedVehicle ?? undefined;
       track.possibleMatchVehicles = searchRes.possibleMatches ?? [];
-      // Map to valid TrackOcrState values
       track.ocrState = track.matchType === 'EXACT' ? 'MATCHED' : track.matchType === 'POSSIBLE' ? 'POSSIBLE_MATCH' : 'NOT_FOUND';
 
       if (searchRes.matchType === 'EXACT') {
         if (settingsRef.current.soundEnabled) playAlertSound('EXACT_MATCH');
         if (settingsRef.current.vibrationEnabled) triggerVibration([200, 100, 200, 100]);
 
-        // Add to match queue — does NOT stop scanner
         const entry: MatchEntry = {
           type: 'EXACT',
           plate,
@@ -307,7 +304,7 @@ export default function ScannerPage() {
     }
   }, []);
 
-  // ─── 7. Main ANPR Loop ───────────────────────────────────────────────────
+  // ─── 7. Main ANPR Pipeline Loop ──────────────────────────────────────────
   useEffect(() => {
     if (!cameraReady) return;
 
@@ -316,7 +313,6 @@ export default function ScannerPage() {
     let detTs = Date.now();
     let detCount = 0;
 
-    // Detection runs at ~10 FPS independently from render loop
     const runDetection = async () => {
       if (!videoRef.current || !canvasRef.current || isPausedRef.current) return;
 
@@ -333,23 +329,47 @@ export default function ScannerPage() {
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
 
-      // Draw current video frame
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // ── Full-frame plate detection ──
       const s = settingsRef.current;
-      const detectedBoxes = detectPlatesFullFrame(canvas, s.detectionThreshold, s.maxTracks);
 
-      // ── Update tracker with all detections ──
-      const allTracks = trackerRef.current.updateTracks(detectedBoxes);
+      // ── Step 1: Malaysian Plate Detector (YOLOv8 Roboflow Model / ONNX / CV) ──
+      const detectedPlates: DetectedPlateBox[] = await detectMalaysianPlates(canvas, {
+        apiKey: s.roboflowApiKey,
+        minConfidence: s.detectionThreshold,
+        enginePreference: s.detectorEngine,
+      });
 
-      setPlatesVisible(detectedBoxes.length);
-      setActiveTracks(allTracks.length);
+      if (detectedPlates.length > 0) {
+        setActiveEngine(detectedPlates[0].sourceEngine);
+        const avgConf = detectedPlates.reduce((sum, p) => sum + p.confidence, 0) / detectedPlates.length;
+        setAvgConfidence(avgConf);
+      }
 
-      // ── Draw overlays ──
+      const bboxList = detectedPlates.map(p => ({
+        x: p.bbox.x,
+        y: p.bbox.y,
+        width: p.bbox.width,
+        height: p.bbox.height,
+        confidence: p.confidence,
+      }));
+
+      // ── Step 2: Multi-Object ByteTrack ──
+      const allTracks = trackerRef.current.updateTracks(bboxList);
+
+      setPlatesVisible(bboxList.length);
+      setActiveTracksCount(allTracks.length);
+
+      // ── Step 3: Best Frame Selection & Quality Assessment ──
+      allTracks.forEach(track => {
+        const cropCanvas = cropCanvasRegion(canvas, track.bbox);
+        globalBestFrameSelector.addCropCandidate(track.trackNumber, cropCanvas, track.bbox);
+      });
+
+      // ── Step 4: Draw Overlays ──
       drawOverlays(ctx, canvas.width, canvas.height, allTracks, s.showCenterGuide, s.debugMode);
 
-      // ── OCR priority queue — max N concurrent jobs ──
+      // ── Step 5: OCR Queue Processing ──
       const { prioritiseTracks: getPriority } = await import('@/lib/anpr/imageProcessor');
       const priorityIds = getPriority(
         allTracks.map(t => ({ trackId: t.trackId, bbox: t.bbox, framesSeen: t.framesSeen, ocrState: t.ocrState })),
@@ -363,44 +383,37 @@ export default function ScannerPage() {
         if (!track || track.ocrRunning || track.cooldownActive) continue;
         if (activeOcrCount.current >= s.maxOcrConcurrency) break;
 
-        // Collect enough frames before OCR
-        if (track.framesSeen < 3) {
+        if (track.framesSeen < 2) {
           track.ocrState = 'COLLECTING';
           continue;
         }
 
-        // Crop the plate region
-        const cropCanvas = cropCanvasRegion(canvas, track.bbox);
-        const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true });
-        if (!cropCtx) continue;
+        // Fetch absolute best quality frame crop for this track
+        const bestFrameEntry = globalBestFrameSelector.getBestCrop(track.trackNumber);
+        const targetCrop = bestFrameEntry ? bestFrameEntry.canvas : cropCanvasRegion(canvas, track.bbox);
+        const qualityReport = bestFrameEntry ? bestFrameEntry.quality : { overallScore: 0.6, recommendation: 'PASS' };
 
-        const quality = calculateCropQualityScore(cropCtx, cropCanvas.width, cropCanvas.height);
-        if (quality < 0.20) {
+        if (qualityReport.recommendation === 'REJECT') {
           track.ocrState = 'COLLECTING';
           continue;
         }
 
-        // Store best crop
-        if (track.cropSamples.length < 5) {
-          track.cropSamples.push({
-            qualityScore: quality,
-            timestamp: Date.now(),
-          });
-        }
-
-        // Launch OCR asynchronously — non-blocking
         track.ocrRunning = true;
         track.ocrState = 'OCR_RUNNING';
         activeOcrCount.current++;
 
         (async () => {
           try {
-            const { text, confidence: conf } = await recognizePlateFromCanvas(cropCanvas);
+            // Adaptive preprocessing (8 variants)
+            const adaptiveCrops = generateAdaptiveCrops(canvas, track.bbox);
+            const bestCropVariant = adaptiveCrops[0]?.canvas || targetCrop;
+
+            const { text, confidence: conf } = await recognizePlateFromCanvas(bestCropVariant);
             const updatedTrack = trackerRef.current.getTrack(trackId);
             if (!updatedTrack || updatedTrack.cooldownActive) return;
 
-            if (text && conf >= 0.50) {
-              addOcrVoteToTrack(updatedTrack, text, conf);
+            if (text && conf >= 0.45) {
+              addOcrVoteToTrack(updatedTrack, text, conf, qualityReport.overallScore);
               updatedTrack.ocrState = 'CONSENSUS_BUILDING';
 
               const consensus = evaluateConsensus(
@@ -427,10 +440,8 @@ export default function ScannerPage() {
         })();
       }
 
-      // Update tracks state for results tray (throttled)
       setTracksList([...allTracks]);
 
-      // Detection FPS
       detCount++;
       const now = Date.now();
       if (now - detTs >= 1000) {
@@ -440,7 +451,6 @@ export default function ScannerPage() {
       }
     };
 
-    // Camera render FPS counter
     const renderLoop = () => {
       if (!isPausedRef.current) {
         camFrameCount.current++;
@@ -455,7 +465,7 @@ export default function ScannerPage() {
     };
 
     animId = requestAnimationFrame(renderLoop);
-    detectionInterval = setInterval(runDetection, 100); // 10 FPS target for detection
+    detectionInterval = setInterval(runDetection, 100);
 
     return () => {
       cancelAnimationFrame(animId);
@@ -472,7 +482,6 @@ export default function ScannerPage() {
     showGuide: boolean,
     debug: boolean
   ) {
-    // Optional very subtle center guide (disabled by default)
     if (showGuide) {
       ctx.strokeStyle = 'rgba(0, 216, 246, 0.2)';
       ctx.lineWidth = 1;
@@ -482,7 +491,6 @@ export default function ScannerPage() {
       ctx.setLineDash([]);
     }
 
-    // Draw per-track bounding boxes
     tracks.forEach(track => {
       const { x, y, width, height } = track.bbox;
       const color = getTrackColor(track);
@@ -490,27 +498,20 @@ export default function ScannerPage() {
       const reading = track.stabilizedPlate || getTrackReadingDisplay(track);
       const displayNum = track.trackNumber;
 
-      // Main bounding box stroke
       ctx.strokeStyle = color;
       ctx.lineWidth = 2.5;
       ctx.setLineDash([]);
       ctx.strokeRect(x, y, width, height);
 
-      // Corner accent marks
       const cl = Math.min(14, width * 0.15, height * 0.25);
       ctx.lineWidth = 4;
       ctx.beginPath();
-      // TL
       ctx.moveTo(x, y + cl); ctx.lineTo(x, y); ctx.lineTo(x + cl, y);
-      // TR
       ctx.moveTo(x + width - cl, y); ctx.lineTo(x + width, y); ctx.lineTo(x + width, y + cl);
-      // BL
       ctx.moveTo(x, y + height - cl); ctx.lineTo(x, y + height); ctx.lineTo(x + cl, y + height);
-      // BR
       ctx.moveTo(x + width - cl, y + height); ctx.lineTo(x + width, y + height); ctx.lineTo(x + width, y + height - cl);
       ctx.stroke();
 
-      // Label badge — position above or below depending on space
       const labelY = y > 70 ? y - 4 : y + height + 4;
       const labelAnchor = y > 70 ? 'bottom' : 'top';
 
@@ -524,17 +525,14 @@ export default function ScannerPage() {
       const badgeY = labelAnchor === 'bottom' ? labelY - badgeH : labelY;
       const badgeX = Math.max(0, Math.min(W - textW - 10, x));
 
-      // Badge background
       ctx.fillStyle = color + 'dd';
       ctx.beginPath();
       ctx.roundRect(badgeX, badgeY, textW + 10, badgeH, 4);
       ctx.fill();
 
-      // Badge text
       ctx.fillStyle = track.matchType === 'EXACT' || track.matchType === 'POSSIBLE' ? '#fff' : '#0a0a0f';
       ctx.fillText(badgeText, badgeX + 5, badgeY + 14);
 
-      // Status word below
       if (reading && reading !== label) {
         const statusText = label;
         ctx.font = 'bold 9px monospace';
@@ -544,13 +542,6 @@ export default function ScannerPage() {
         ctx.fillRect(badgeX, sbY, sw + 8, 14);
         ctx.fillStyle = '#fff';
         ctx.fillText(statusText, badgeX + 4, sbY + 10);
-      }
-
-      // Debug confidence on box
-      if (debug) {
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.font = '9px monospace';
-        ctx.fillText(`det:${Math.round(track.bbox.confidence * 100)}%`, x + 2, y + height - 3);
       }
     });
   }
@@ -580,20 +571,13 @@ export default function ScannerPage() {
     setViewingMatch(null);
   };
 
-  const dismissMatch = (plate: string) => {
-    setMatchQueue(q => q.filter(m => m.plate !== plate));
-    if (viewingMatch?.plate === plate) setViewingMatch(null);
-  };
-
   const activeMatches = matchQueue.filter(m => !m.dismissed);
 
-  // ─── 10. Render ──────────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 bg-black flex flex-col overflow-hidden" style={{ zIndex: 100 }}>
 
-      {/* ── TOP BAR ── */}
-      <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 bg-black/70 backdrop-blur-sm border-b border-white/10 z-20">
-        {/* Left: Back */}
+      {/* ── TOP CONTROL BAR ── */}
+      <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 bg-black/80 backdrop-blur-md border-b border-white/10 z-20">
         <Link
           href="/"
           className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-white"
@@ -602,15 +586,13 @@ export default function ScannerPage() {
           <span className="hidden sm:inline">Back</span>
         </Link>
 
-        {/* Centre: Title */}
         <div className="flex items-center gap-2">
           <div className="w-1.5 h-1.5 rounded-full bg-[#00d8f6] animate-ping" />
           <span className="text-xs sm:text-sm font-black tracking-widest text-white uppercase">
-            Live Multi-Vehicle Scanner
+            Live ANPR Multi-Vehicle Scanner
           </span>
         </div>
 
-        {/* Right: Controls */}
         <div className="flex items-center gap-1.5">
           {torchSupported && (
             <button
@@ -647,9 +629,14 @@ export default function ScannerPage() {
         </div>
       </div>
 
+      {/* ── MODEL STATUS BANNER ── */}
+      <div className="px-3 py-1.5 z-20">
+        <ModelStatusBanner detectorEngine={activeEngine} confidenceScore={avgConfidence} />
+      </div>
+
       {/* ── DEBUG PERFORMANCE CHIP ── */}
       {settingsRef.current?.debugMode !== false && (
-        <div className="absolute top-14 left-3 z-30 flex items-center gap-1.5 text-[10px] font-mono font-bold pointer-events-none">
+        <div className="absolute top-20 left-3 z-30 flex items-center gap-1.5 text-[10px] font-mono font-bold pointer-events-none">
           <span className="px-2 py-0.5 bg-black/70 text-[#00d8f6] rounded border border-[#00d8f6]/30">
             CAM {camFps} FPS
           </span>
@@ -660,17 +647,13 @@ export default function ScannerPage() {
             PLATES {platesVisible}
           </span>
           <span className="px-2 py-0.5 bg-black/70 text-slate-300 rounded border border-slate-700">
-            TRACKS {activeTracks}
-          </span>
-          <span className="px-2 py-0.5 bg-black/70 text-purple-400 rounded border border-purple-400/30">
-            CV ENGINE
+            TRACKS {activeTracksCount}
           </span>
         </div>
       )}
 
-      {/* ── MAIN CAMERA AREA ── */}
+      {/* ── MAIN CAMERA CANVAS AREA ── */}
       <div className="flex-1 relative overflow-hidden">
-        {/* Camera Error State */}
         {cameraError && (
           <div className="absolute inset-0 flex items-center justify-center bg-[#090a0f] z-10 p-6">
             <div className="max-w-sm text-center">
@@ -687,15 +670,13 @@ export default function ScannerPage() {
           </div>
         )}
 
-        {/* Loading State */}
         {!cameraError && !cameraReady && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#090a0f] z-10 gap-4">
             <div className="w-12 h-12 border-4 border-[#00d8f6]/20 border-t-[#00d8f6] rounded-full animate-spin" />
-            <p className="text-sm font-semibold text-slate-400">Initialising camera…</p>
+            <p className="text-sm font-semibold text-slate-400">Loading YOLOv8 Malaysian Plate Detector…</p>
           </div>
         )}
 
-        {/* Video feed (hidden — canvas is displayed over it) */}
         <video
           ref={videoRef}
           playsInline
@@ -704,14 +685,12 @@ export default function ScannerPage() {
           style={{ opacity: 0 }}
         />
 
-        {/* Canvas — full-frame ANPR overlay */}
         <canvas
           ref={canvasRef}
           className="absolute inset-0 w-full h-full object-cover"
           style={{ display: cameraReady ? 'block' : 'none' }}
         />
 
-        {/* Paused overlay */}
         {isPaused && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-10">
             <div className="flex flex-col items-center gap-2">
@@ -727,7 +706,7 @@ export default function ScannerPage() {
           </div>
         )}
 
-        {/* ── MATCH NOTIFICATION BADGES (top-right) ── */}
+        {/* MATCH NOTIFICATION BADGES */}
         {activeMatches.length > 0 && !viewingMatch && (
           <div className="absolute top-3 right-3 z-20 flex flex-col gap-2">
             {activeMatches.map(entry => (
@@ -755,13 +734,12 @@ export default function ScannerPage() {
 
       {/* ── LIVE RESULTS TRAY ── */}
       <div className={`flex-shrink-0 bg-[#090a0f]/95 backdrop-blur-lg border-t border-[#252833] transition-all ${trayExpanded ? 'max-h-52' : 'max-h-12'} overflow-hidden`}>
-        {/* Tray Header */}
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#252833]">
           <div className="flex items-center gap-2">
             <span className="text-xs font-extrabold text-white tracking-wide">LIVE RESULTS</span>
-            {activeTracks > 0 && (
+            {activeTracksCount > 0 && (
               <span className="px-1.5 py-0.5 bg-[#00d8f6] text-slate-950 text-[10px] font-black rounded">
-                {activeTracks}
+                {activeTracksCount}
               </span>
             )}
           </div>
@@ -778,7 +756,6 @@ export default function ScannerPage() {
           </div>
         </div>
 
-        {/* Track Rows */}
         {trayExpanded && (
           <div className="overflow-y-auto max-h-36 divide-y divide-[#252833]">
             {tracksList.length === 0 ? (
@@ -791,7 +768,6 @@ export default function ScannerPage() {
                   key={track.trackId}
                   className="flex items-center gap-3 px-4 py-2 hover:bg-[#16181e] transition-colors"
                 >
-                  {/* Track number badge */}
                   <span
                     className="w-8 text-center text-[10px] font-black rounded px-1 py-0.5 shrink-0"
                     style={{ background: getTrackColor(track) + '22', color: getTrackColor(track), border: `1px solid ${getTrackColor(track)}44` }}
@@ -799,12 +775,10 @@ export default function ScannerPage() {
                     #{track.trackNumber}
                   </span>
 
-                  {/* Plate reading */}
                   <span className="font-mono font-extrabold text-sm text-white w-24 truncate shrink-0">
                     {track.stabilizedPlate ?? getTrackReadingDisplay(track) ?? '–'}
                   </span>
 
-                  {/* Status */}
                   <span
                     className="text-[10px] font-bold w-16 shrink-0"
                     style={{ color: getTrackColor(track) }}
@@ -812,7 +786,6 @@ export default function ScannerPage() {
                     {getTrackStatusLabel(track)}
                   </span>
 
-                  {/* Confidence */}
                   <span className="text-xs text-slate-400 font-mono shrink-0 w-10">
                     {track.stabilizedConfidence != null
                       ? `${Math.round(track.stabilizedConfidence * 100)}%`
@@ -821,7 +794,6 @@ export default function ScannerPage() {
                       : '–'}
                   </span>
 
-                  {/* Match vehicle name */}
                   {track.matchedVehicle && (
                     <span className="text-xs text-slate-400 truncate hidden sm:block">
                       {track.matchedVehicle.vehicleMake} {track.matchedVehicle.vehicleModel} · {track.matchedVehicle.financeCompany}
@@ -834,9 +806,9 @@ export default function ScannerPage() {
         )}
       </div>
 
-      {/* ── MATCH DETAIL MODAL (non-blocking — scanner continues) ── */}
+      {/* ── MATCH DETAIL MODAL ── */}
       {viewingMatch && (
-        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4" style={{ pointerEvents: 'auto' }}>
+        <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
           <div
             className={`max-w-md w-full rounded-2xl p-6 shadow-2xl border-2 ${
               viewingMatch.type === 'EXACT'
@@ -844,7 +816,6 @@ export default function ScannerPage() {
                 : 'bg-amber-950/95 border-amber-500'
             }`}
           >
-            {/* Header */}
             <div className="flex items-center justify-between mb-4 pb-4 border-b border-white/10">
               <div className="flex items-center gap-3">
                 {viewingMatch.type === 'EXACT'
@@ -862,7 +833,6 @@ export default function ScannerPage() {
               </span>
             </div>
 
-            {/* Exact match vehicle details */}
             {viewingMatch.type === 'EXACT' && viewingMatch.vehicle && (
               <div className="grid grid-cols-2 gap-2 mb-4 text-xs">
                 {[
@@ -885,7 +855,6 @@ export default function ScannerPage() {
               </div>
             )}
 
-            {/* Possible match list */}
             {viewingMatch.type === 'POSSIBLE' && viewingMatch.possibleMatches.length > 0 && (
               <div className="mb-4 text-xs space-y-2">
                 <p className="text-amber-200 mb-2">
@@ -904,10 +873,9 @@ export default function ScannerPage() {
             )}
 
             <div className="text-[10px] text-slate-400 mb-4">
-              Confidence: {Math.round(viewingMatch.confidence * 100)}% · Scanner masih berjalan di belakang.
+              Confidence: {Math.round(viewingMatch.confidence * 100)}% · Multi-vehicle scanner is running in background.
             </div>
 
-            {/* Actions */}
             <div className="flex flex-wrap gap-2 justify-end">
               <button
                 onClick={() => reportWrong(viewingMatch)}
@@ -933,8 +901,6 @@ export default function ScannerPage() {
           </div>
         </div>
       )}
-
-      {/* Scanner stays on full screen — BottomNav hidden to maximise camera area */}
     </div>
   );
 }

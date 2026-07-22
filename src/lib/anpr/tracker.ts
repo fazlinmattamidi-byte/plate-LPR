@@ -16,44 +16,35 @@ export interface TrackCropSample {
   ocrConfidence?: number;
 }
 
-/**
- * Full per-track state — each detected plate region gets its own independent state machine.
- * This enables true multi-vehicle scanning where every plate is tracked, read and matched independently.
- */
 export interface ActiveTrack {
   trackId: string;
-  trackNumber: number;                // human-readable display number (#12, #13 etc.)
+  trackNumber: number;
   bbox: BoundingBox;
+  predictedBbox?: BoundingBox;
+  vx: number; // velocity x (pixels per frame)
+  vy: number; // velocity y (pixels per frame)
   cropSamples: TrackCropSample[];
   lastSeenFrame: number;
   firstSeenFrame: number;
   framesSeen: number;
 
-  // OCR per-track state machine
   ocrState: TrackOcrState;
   ocrRunning: boolean;
   ocrJobQueued: boolean;
 
-  // Per-track consensus voting — isolated, never shared with other tracks
   votes: Map<string, { count: number; totalConfidence: number }>;
   stabilizedPlate?: string;
   stabilizedConfidence?: number;
 
-  // Per-track match result
   matchType?: 'EXACT' | 'POSSIBLE' | 'NONE';
-  matchedVehicle?: any;   // VehicleCase but avoid circular import
+  matchedVehicle?: any;
   possibleMatchVehicles?: any[];
 
-  // Per-track cooldown state
   cooldownActive: boolean;
   lastSearchedAt?: number;
   scanEventId?: string;
 }
 
-/**
- * Calculates Intersection over Union between two bounding boxes.
- * Used by the IoU tracker to associate detections across frames.
- */
 export function calculateIoU(boxA: BoundingBox, boxB: BoundingBox): number {
   const xA = Math.max(boxA.x, boxB.x);
   const yA = Math.max(boxA.y, boxB.y);
@@ -73,50 +64,66 @@ export function calculateIoU(boxA: BoundingBox, boxB: BoundingBox): number {
 }
 
 /**
- * SORT-inspired lightweight IoU tracker for real-time plate tracking.
- *
- * Behaviour:
- * - Detections from each frame are matched to existing tracks via IoU.
- * - Tracks survive N frames without a detection before being removed (lostTrackTimeout).
- * - New tracks are created for unmatched detections.
- * - Each track maintains its own voting history, OCR state and match result.
- * - Tracks do NOT reset when briefly lost (e.g. vehicle moves fast or occlusion).
- *
- * This enables:
- * - Moving vehicles to accumulate OCR votes across frames even when detection is intermittent
- * - Camera shake to not create new track IDs on every frame
- * - Multiple simultaneous vehicles to be tracked independently
+ * ByteTrack-inspired Multi-Object Tracker for Real-Time License Plate Tracking.
+ * 
+ * Key Features:
+ * - High-confidence & low-confidence two-stage association.
+ * - Velocity prediction (dx, dy) for moving vehicles & moving cameras.
+ * - Max active tracks pool (default 8).
+ * - Independent track memory buffer & state machine.
  */
 export class PlateTracker {
   private activeTracks: Map<string, ActiveTrack> = new Map();
   private trackCounter: number = 1;
   private frameIndex: number = 0;
-  private iouThreshold: number = 0.25;   // lower threshold for moving vehicle tolerance
-  private lostTrackTimeout: number = 15;  // frames before removing a track not seen
+  private iouThreshold: number = 0.20;
+  private lostTrackTimeout: number = 20;
+  private maxActiveTracks: number = 8;
 
-  constructor(lostTrackTimeout?: number) {
-    if (lostTrackTimeout !== undefined) {
-      this.lostTrackTimeout = lostTrackTimeout;
-    }
+  constructor(lostTrackTimeout?: number, maxActiveTracks?: number) {
+    if (lostTrackTimeout !== undefined) this.lostTrackTimeout = lostTrackTimeout;
+    if (maxActiveTracks !== undefined) this.maxActiveTracks = maxActiveTracks;
   }
 
-  /**
-   * Update tracker with detections from the current frame.
-   * Returns all currently active tracks (including briefly lost ones still within timeout).
-   */
   public updateTracks(detectedBoxes: BoundingBox[]): ActiveTrack[] {
     this.frameIndex++;
 
-    const unmatchedDetIdx = new Set<number>(detectedBoxes.map((_, i) => i));
+    // 1. Separate detections into High Confidence and Low Confidence
+    const highConfDets: { box: BoundingBox; idx: number }[] = [];
+    const lowConfDets: { box: BoundingBox; idx: number }[] = [];
 
-    // --- Step 1: Match existing tracks to new detections ---
+    detectedBoxes.forEach((box, idx) => {
+      if (box.confidence >= 0.40) {
+        highConfDets.push({ box, idx });
+      } else {
+        lowConfDets.push({ box, idx });
+      }
+    });
+
+    const unassignedHigh = new Set<number>(highConfDets.map(d => d.idx));
+    const unassignedLow = new Set<number>(lowConfDets.map(d => d.idx));
+
+    // 2. Predict next position for active tracks using velocity (Kalman/Constant Velocity model)
+    this.activeTracks.forEach((track) => {
+      const dt = this.frameIndex - track.lastSeenFrame;
+      track.predictedBbox = {
+        x: track.bbox.x + track.vx * dt,
+        y: track.bbox.y + track.vy * dt,
+        width: track.bbox.width,
+        height: track.bbox.height,
+        confidence: track.bbox.confidence,
+      };
+    });
+
+    // 3. First Stage Association: Match Active Tracks with High Confidence Detections
     this.activeTracks.forEach((track) => {
       let bestIoU = this.iouThreshold;
       let bestIdx = -1;
 
-      detectedBoxes.forEach((box, idx) => {
-        if (!unmatchedDetIdx.has(idx)) return;
-        const iou = calculateIoU(track.bbox, box);
+      highConfDets.forEach(({ box, idx }) => {
+        if (!unassignedHigh.has(idx)) return;
+        const targetBox = track.predictedBbox || track.bbox;
+        const iou = calculateIoU(targetBox, box);
         if (iou > bestIoU) {
           bestIoU = iou;
           bestIdx = idx;
@@ -124,25 +131,61 @@ export class PlateTracker {
       });
 
       if (bestIdx !== -1) {
-        // Successfully matched: update bounding box position
-        track.bbox = detectedBoxes[bestIdx];
+        const matchedBox = detectedBoxes[bestIdx];
+        // Calculate velocity update
+        const dx = matchedBox.x - track.bbox.x;
+        const dy = matchedBox.y - track.bbox.y;
+        track.vx = track.vx * 0.7 + dx * 0.3; // Smooth velocity
+        track.vy = track.vy * 0.7 + dy * 0.3;
+
+        track.bbox = matchedBox;
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
-        unmatchedDetIdx.delete(bestIdx);
+        unassignedHigh.delete(bestIdx);
       }
     });
 
-    // --- Step 2: Create new tracks for unmatched detections ---
-    unmatchedDetIdx.forEach((idx) => {
+    // 4. Second Stage Association: Match Unassigned Tracks with Low Confidence Detections
+    this.activeTracks.forEach((track) => {
+      if (track.lastSeenFrame === this.frameIndex) return; // Already updated in Stage 1
+
+      let bestIoU = this.iouThreshold * 0.8;
+      let bestIdx = -1;
+
+      lowConfDets.forEach(({ box, idx }) => {
+        if (!unassignedLow.has(idx)) return;
+        const targetBox = track.predictedBbox || track.bbox;
+        const iou = calculateIoU(targetBox, box);
+        if (iou > bestIoU) {
+          bestIoU = iou;
+          bestIdx = idx;
+        }
+      });
+
+      if (bestIdx !== -1) {
+        const matchedBox = detectedBoxes[bestIdx];
+        track.bbox = matchedBox;
+        track.lastSeenFrame = this.frameIndex;
+        track.framesSeen++;
+        unassignedLow.delete(bestIdx);
+      }
+    });
+
+    // 5. Create New Tracks for Unassigned High Confidence Detections
+    unassignedHigh.forEach((idx) => {
+      // Enforce max active tracks limit
+      if (this.activeTracks.size >= this.maxActiveTracks) return;
+
       const box = detectedBoxes[idx];
-      // Minimum size filter — ignore very small regions (noise)
-      if (box.width < 40 || box.height < 10) return;
+      if (box.width < 35 || box.height < 10) return;
 
       const num = this.trackCounter++;
       const newTrack: ActiveTrack = {
         trackId: `trk-${num}`,
         trackNumber: num,
         bbox: box,
+        vx: 0,
+        vy: 0,
         cropSamples: [],
         lastSeenFrame: this.frameIndex,
         firstSeenFrame: this.frameIndex,
@@ -156,7 +199,7 @@ export class PlateTracker {
       this.activeTracks.set(newTrack.trackId, newTrack);
     });
 
-    // --- Step 3: Remove stale tracks that have exceeded the lost timeout ---
+    // 6. Remove Stale Tracks
     this.activeTracks.forEach((track, id) => {
       const framesLost = this.frameIndex - track.lastSeenFrame;
       if (framesLost > this.lostTrackTimeout) {

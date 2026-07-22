@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Camera, Sliders, Database, RotateCcw, Save, ShieldAlert } from 'lucide-react';
+import { Settings as SettingsIcon, Camera, Sliders, Database, RotateCcw, Save, ShieldAlert, Cpu, Key } from 'lucide-react';
 import { Header } from '@/components/layout/Header';
 import { BottomNav } from '@/components/layout/BottomNav';
 import { ScannerSettings } from '@/lib/db/types';
@@ -9,7 +9,6 @@ import { INITIAL_SETTINGS } from '@/lib/db/settingsDefaults';
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<ScannerSettings>({ ...INITIAL_SETTINGS });
-
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState(false);
 
@@ -68,7 +67,7 @@ export default function SettingsPage() {
               Settings
             </h1>
             <p className="text-sm text-slate-400 mt-1">
-              Configure camera, AI detection thresholds, sound, and data settings.
+              Configure Roboflow AI Detector, camera, thresholds, and data settings.
             </p>
           </div>
 
@@ -89,11 +88,66 @@ export default function SettingsPage() {
         )}
 
         <div className="space-y-6 text-xs">
+          {/* AI Model & Detector Engine Settings */}
+          <div className="bg-[#16181e] border border-[#252833] rounded-2xl p-6">
+            <h2 className="text-sm font-bold tracking-wider text-slate-400 uppercase mb-4 flex items-center gap-2">
+              <Cpu className="w-4 h-4 text-[#00d8f6]" />
+              Malaysian Plate Detector Model (YOLOv8)
+            </h2>
+
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-slate-300 block mb-1 font-semibold">Enjin Deteksi Plat</label>
+                  <select
+                    value={settings.detectorEngine || 'AUTO'}
+                    onChange={(e) => setSettings({ ...settings, detectorEngine: e.target.value as any })}
+                    className="w-full bg-[#090a0f] border border-[#252833] rounded-xl px-3 py-2 text-white"
+                  >
+                    <option value="AUTO">AUTO (Roboflow AI → ONNX → CV Fallback)</option>
+                    <option value="ROBOFLOW_API">Roboflow Hosted API (fyp-hq4ka)</option>
+                    <option value="LOCAL_ONNX">Local ONNX Model (/models/plate-detector.onnx)</option>
+                    <option value="CV_HEURISTIC">Computer Vision Heuristic (Offline)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-slate-300 block mb-1 font-semibold">Enjin OCR Pengecaman</label>
+                  <select
+                    value={settings.ocrEngine || 'TESSERACT'}
+                    onChange={(e) => setSettings({ ...settings, ocrEngine: e.target.value as any })}
+                    className="w-full bg-[#090a0f] border border-[#252833] rounded-xl px-3 py-2 text-white"
+                  >
+                    <option value="TESSERACT">Tesseract.js Alphanumeric Engine</option>
+                    <option value="ONNX_MODEL">Custom ONNX OCR Model (PP-OCR / CRNN)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-semibold flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-[#00d8f6]" />
+                  Roboflow API Key (Universe Project: fyp-hq4ka/license-plate-malaysia-kqy48)
+                </label>
+                <input
+                  type="password"
+                  value={settings.roboflowApiKey || 'QhgkpEMcagyM4hkiKOVl'}
+                  onChange={(e) => setSettings({ ...settings, roboflowApiKey: e.target.value })}
+                  placeholder="Enter Roboflow API Key"
+                  className="w-full bg-[#090a0f] border border-[#252833] rounded-xl px-3 py-2 text-white font-mono text-xs"
+                />
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Model ID: <span className="font-mono text-slate-300">fyp-hq4ka/license-plate-malaysia-kqy48/2</span> (mAP 97.47%)
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Scanner Settings */}
           <div className="bg-[#16181e] border border-[#252833] rounded-2xl p-6">
             <h2 className="text-sm font-bold tracking-wider text-slate-400 uppercase mb-4 flex items-center gap-2">
               <Camera className="w-4 h-4 text-[#00d8f6]" />
-              Tetapan Kamera & Detection
+              Tetapan Kamera & Resolution
             </h2>
 
             <div className="space-y-4">

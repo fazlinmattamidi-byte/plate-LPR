@@ -2,10 +2,14 @@ import { BoundingBox } from './tracker';
 import { PlateLayout } from '../db/types';
 
 export type PreprocessVariant =
+  | 'ORIGINAL'
+  | 'GRAYSCALE'
   | 'DEFAULT_CONTRAST'
   | 'INVERTED'
   | 'CLAHE'
-  | 'SHARPEN';
+  | 'SHARPEN'
+  | 'DARK_BG'
+  | 'NOISE_REDUCED';
 
 export interface MultiCropResult {
   variant: PreprocessVariant;
@@ -18,14 +22,13 @@ export interface MultiCropResult {
 }
 
 /**
- * Full-frame sliding window plate detector.
- * Scans the ENTIRE camera frame for plate-shaped rectangular regions using sliding window + NMS.
+ * CV Heuristic Candidate Region Detection (Fallback when ONNX model is unavailable).
  */
-export function detectPlatesFullFrame(
+export function detectPlateCandidatesCV(
   canvas: HTMLCanvasElement,
-  minConfidence: number = 0.45,
+  minConfidence: number = 0.35,
   maxCandidates: number = 8
-): BoundingBox[] {
+): { crop: BoundingBox; confidence: number }[] {
   const W = canvas.width;
   const H = canvas.height;
 
@@ -35,8 +38,6 @@ export function detectPlatesFullFrame(
   if (!ctx) return [];
 
   const candidates: BoundingBox[] = [];
-
-  // Aspect ratios: standard ~4.5:1, compact ~3.2:1, motorcycle/square ~1.6:1
   const plateAspectRatios = [4.5, 3.8, 3.2, 2.2, 1.6];
   const scanScales = [0.12, 0.18, 0.25, 0.35, 0.45, 0.55];
 
@@ -45,7 +46,6 @@ export function detectPlatesFullFrame(
 
     for (const ar of plateAspectRatios) {
       const plateH = Math.round(plateW / ar);
-
       if (plateH < 14 || plateW < 50) continue;
 
       const stepX = Math.max(Math.round(plateW * 0.35), 20);
@@ -54,7 +54,6 @@ export function detectPlatesFullFrame(
       for (let y = 0; y <= H - plateH; y += stepY) {
         for (let x = 0; x <= W - plateW; x += stepX) {
           const score = scorePlateCandidateRegion(ctx, x, y, plateW, plateH);
-
           if (score >= minConfidence) {
             candidates.push({
               x,
@@ -69,10 +68,12 @@ export function detectPlatesFullFrame(
     }
   }
 
-  // Non-Maximum Suppression
   const nmsResult = applyNMS(candidates, 0.45);
   nmsResult.sort((a, b) => b.confidence - a.confidence);
-  return nmsResult.slice(0, maxCandidates);
+  return nmsResult.slice(0, maxCandidates).map((box) => ({
+    crop: box,
+    confidence: box.confidence,
+  }));
 }
 
 /**
@@ -185,50 +186,80 @@ function computeBoxIoU(a: BoundingBox, b: BoundingBox): number {
 }
 
 /**
- * Creates controlled adaptive preprocessing crop variants (Original, Grayscale/CLAHE, Inverted, Sharpened).
- * Also detects 2-line / square motorcycle layout crops and extracts top and bottom line rows.
+ * Generate 8 adaptive image preprocessing versions for OCR recognition:
+ * - Original
+ * - Grayscale
+ * - Default Contrast (Binarized)
+ * - Inverted (White background plates / JPJePlate)
+ * - CLAHE (Histogram Contrast Stretch)
+ * - Sharpened
+ * - Dark Background (Black plate optimization)
+ * - Noise Reduced
  */
 export function generateAdaptiveCrops(
   sourceCanvas: HTMLCanvasElement | HTMLVideoElement,
   bbox: BoundingBox,
-  targetWidth: number = 320,
-  targetHeight: number = 96
+  targetWidth: number = 360,
+  targetHeight: number = 108
 ): MultiCropResult[] {
   const results: MultiCropResult[] = [];
 
-  // Determine aspect ratio to check if 2-line layout
   const ar = bbox.width / (bbox.height || 1);
-  const isTwoLine = ar < 2.3; // 2-line plates have lower aspect ratio (< 2.3)
+  const isTwoLine = ar < 2.3;
   const layout: PlateLayout = isTwoLine ? (ar < 1.6 ? 'SQUARE' : 'TWO_LINE') : 'SINGLE_LINE';
 
-  const variants: PreprocessVariant[] = ['DEFAULT_CONTRAST', 'INVERTED', 'CLAHE'];
+  const variants: PreprocessVariant[] = [
+    'ORIGINAL',
+    'GRAYSCALE',
+    'DEFAULT_CONTRAST',
+    'INVERTED',
+    'CLAHE',
+    'SHARPEN',
+    'DARK_BG',
+    'NOISE_REDUCED',
+  ];
 
   for (const variant of variants) {
     const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = targetWidth;
-    cropCanvas.height = targetHeight;
+
+    // Auto-upscale small plates from distant vehicles
+    let scaleFactor = 1.0;
+    if (bbox.width < 120 || bbox.height < 35) {
+      scaleFactor = 1.6; // Upscale distant small plates
+    }
+
+    const scaledW = Math.round(targetWidth * scaleFactor);
+    const scaledH = Math.round(targetHeight * scaleFactor);
+
+    cropCanvas.width = scaledW;
+    cropCanvas.height = scaledH;
     const ctx = cropCanvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) continue;
 
-    const padX = bbox.width * 0.07;
-    const padY = bbox.height * 0.10;
+    const padX = bbox.width * 0.08;
+    const padY = bbox.height * 0.12;
 
     const srcX = Math.max(0, bbox.x - padX);
     const srcY = Math.max(0, bbox.y - padY);
-    const srcW = Math.min((sourceCanvas.width || (sourceCanvas as HTMLVideoElement).videoWidth) - srcX, bbox.width + padX * 2);
-    const srcH = Math.min((sourceCanvas.height || (sourceCanvas as HTMLVideoElement).videoHeight) - srcY, bbox.height + padY * 2);
+    const srcW = Math.min(
+      (sourceCanvas.width || (sourceCanvas as HTMLVideoElement).videoWidth) - srcX,
+      bbox.width + padX * 2
+    );
+    const srcH = Math.min(
+      (sourceCanvas.height || (sourceCanvas as HTMLVideoElement).videoHeight) - srcY,
+      bbox.height + padY * 2
+    );
 
-    ctx.drawImage(sourceCanvas, srcX, srcY, srcW, srcH, 0, 0, targetWidth, targetHeight);
+    ctx.drawImage(sourceCanvas, srcX, srcY, srcW, srcH, 0, 0, scaledW, scaledH);
 
-    // Apply adaptive variant transformation
-    preprocessCropVariant(ctx, targetWidth, targetHeight, variant);
+    // Apply specific preprocessing variant
+    preprocessCropVariant(ctx, scaledW, scaledH, variant);
 
-    const quality = calculateCropQualityScore(ctx, targetWidth, targetHeight);
+    const quality = calculateCropQualityScore(ctx, scaledW, scaledH);
 
     let topLineCanvas: HTMLCanvasElement | undefined;
     let bottomLineCanvas: HTMLCanvasElement | undefined;
 
-    // If 2-line or square, split crop into top and bottom line crops
     if (isTwoLine) {
       const lineCrops = splitTwoLineCrop(cropCanvas);
       topLineCanvas = lineCrops.top;
@@ -246,7 +277,6 @@ export function generateAdaptiveCrops(
     });
   }
 
-  // Sort by quality score
   results.sort((a, b) => b.qualityScore - a.qualityScore);
   return results;
 }
@@ -260,6 +290,8 @@ export function preprocessCropVariant(
   height: number,
   variant: PreprocessVariant
 ): void {
+  if (variant === 'ORIGINAL') return;
+
   const imgData = ctx.getImageData(0, 0, width, height);
   const data = imgData.data;
 
@@ -274,45 +306,91 @@ export function preprocessCropVariant(
 
   const range = maxL - minL || 1;
 
+  if (variant === 'GRAYSCALE') {
+    ctx.putImageData(imgData, 0, 0);
+    return;
+  }
+
   if (variant === 'DEFAULT_CONTRAST') {
-    // Soft binarization threshold
     const threshold = minL + range * 0.48;
     for (let i = 0; i < data.length; i += 4) {
       const v = data[i] > threshold ? 255 : 0;
       data[i] = data[i + 1] = data[i + 2] = v;
     }
   } else if (variant === 'INVERTED') {
-    // Inverted binarization for Black characters on White background (JPJePlate EV, Taxis)
+    // Inverted for White background plates (JPJePlate EV, Taxis) -> turn black text to white for OCR
     const threshold = minL + range * 0.52;
     for (let i = 0; i < data.length; i += 4) {
-      const v = data[i] < threshold ? 255 : 0; // Black text becomes white text for Tesseract
+      const v = data[i] < threshold ? 255 : 0;
       data[i] = data[i + 1] = data[i + 2] = v;
     }
   } else if (variant === 'CLAHE') {
-    // Contrast Stretch / Histogram equalization stretch
     for (let i = 0; i < data.length; i += 4) {
       const norm = Math.round(((data[i] - minL) / range) * 255);
       const v = norm > 128 ? 255 : 0;
       data[i] = data[i + 1] = data[i + 2] = v;
+    }
+  } else if (variant === 'DARK_BG') {
+    // Optimized for Standard Black Malaysian License Plates
+    const threshold = minL + range * 0.60;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = data[i] > threshold ? 255 : 0;
+      data[i] = data[i + 1] = data[i + 2] = v;
+    }
+  } else if (variant === 'SHARPEN') {
+    // Sharpening Kernel Filter
+    ctx.putImageData(imgData, 0, 0);
+    applySharpenKernel(ctx, width, height);
+    return;
+  } else if (variant === 'NOISE_REDUCED') {
+    // 3x3 Box blur box filter
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        const idx = (y * width + x) * 4;
+        let avg = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            avg += data[((y + dy) * width + (x + dx)) * 4];
+          }
+        }
+        data[idx] = data[idx + 1] = data[idx + 2] = Math.round(avg / 9);
+      }
     }
   }
 
   ctx.putImageData(imgData, 0, 0);
 }
 
-/**
- * Splits a 2-line or motorcycle square plate crop into separate top-row and bottom-row canvases.
- * Geometry order: Top line read first (`ABC`), bottom line read second (`1234`) -> `ABC1234`.
- */
+function applySharpenKernel(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const src = new Uint8ClampedArray(imgData.data);
+  const dst = imgData.data;
+
+  // Kernel: [[0, -1, 0], [-1, 5, -1], [0, -1, 0]]
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+      const c = src[idx] * 5;
+      const top = src[((y - 1) * width + x) * 4];
+      const bot = src[((y + 1) * width + x) * 4];
+      const left = src[(y * width + (x - 1)) * 4];
+      const right = src[(y * width + (x + 1)) * 4];
+
+      const val = Math.min(255, Math.max(0, c - top - bot - left - right));
+      dst[idx] = dst[idx + 1] = dst[idx + 2] = val;
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+}
+
 export function splitTwoLineCrop(
   sourceCanvas: HTMLCanvasElement
 ): { top: HTMLCanvasElement; bottom: HTMLCanvasElement } {
   const W = sourceCanvas.width;
   const H = sourceCanvas.height;
-
   const halfH = Math.round(H * 0.52);
 
-  // Top line crop
   const top = document.createElement('canvas');
   top.width = W;
   top.height = Math.round(H * 0.55);
@@ -321,7 +399,6 @@ export function splitTwoLineCrop(
     topCtx.drawImage(sourceCanvas, 0, 0, W, halfH, 0, 0, W, top.height);
   }
 
-  // Bottom line crop
   const bottom = document.createElement('canvas');
   bottom.width = W;
   bottom.height = Math.round(H * 0.55);
@@ -333,22 +410,6 @@ export function splitTwoLineCrop(
   return { top, bottom };
 }
 
-/**
- * Single crop extraction helper (backward compatibility)
- */
-export function cropCanvasRegion(
-  sourceCanvas: HTMLCanvasElement | HTMLVideoElement,
-  bbox: BoundingBox,
-  targetWidth: number = 320,
-  targetHeight: number = 96
-): HTMLCanvasElement {
-  const crops = generateAdaptiveCrops(sourceCanvas, bbox, targetWidth, targetHeight);
-  return crops.length > 0 ? crops[0].canvas : document.createElement('canvas');
-}
-
-/**
- * Calculates crop quality score (0.0 to 1.0)
- */
 export function calculateCropQualityScore(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -372,9 +433,16 @@ export function calculateCropQualityScore(
   return Math.min(1.0, Math.sqrt(variance) / 128);
 }
 
-/**
- * Priority queue for tracks awaiting OCR processing.
- */
+export function cropCanvasRegion(
+  sourceCanvas: HTMLCanvasElement | HTMLVideoElement,
+  bbox: BoundingBox,
+  targetWidth: number = 360,
+  targetHeight: number = 108
+): HTMLCanvasElement {
+  const crops = generateAdaptiveCrops(sourceCanvas, bbox, targetWidth, targetHeight);
+  return crops.length > 0 ? crops[0].canvas : document.createElement('canvas');
+}
+
 export function prioritiseTracks(
   tracks: { trackId: string; bbox: BoundingBox; framesSeen: number; ocrState: string }[],
   frameWidth: number,
@@ -406,3 +474,5 @@ export function prioritiseTracks(
   scored.sort((a, b) => b.priority - a.priority);
   return scored.slice(0, maxOcrSlots).map(s => s.trackId);
 }
+
+
