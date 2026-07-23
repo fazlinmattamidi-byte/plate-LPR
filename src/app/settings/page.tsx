@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Settings as SettingsIcon, Camera, Sliders, Database, RotateCcw, Save, ShieldAlert, Cpu, Key } from 'lucide-react';
+import { Settings as SettingsIcon, Camera, Sliders, Database, RotateCcw, Save, ShieldAlert, Cpu } from 'lucide-react';
 import { Header } from '@/components/layout/Header';
 import { BottomNav } from '@/components/layout/BottomNav';
 import { ScannerSettings } from '@/lib/db/types';
@@ -67,7 +67,7 @@ export default function SettingsPage() {
               Settings
             </h1>
             <p className="text-sm text-slate-400 mt-1">
-              Configure Roboflow AI Detector, camera, thresholds, and data settings.
+              Configure YOLOv8 AI Detector, camera, thresholds, and data settings.
             </p>
           </div>
 
@@ -107,38 +107,21 @@ export default function SettingsPage() {
                     <option value="AUTO">AUTO (Local ONNX Model)</option>
 
                     <option value="LOCAL_ONNX">Local ONNX Model (/models/plate-detector.onnx)</option>
-                    <option value="CV_HEURISTIC">Computer Vision Heuristic (Offline)</option>
+                    <option value="CV_HEURISTIC">Computer Vision Heuristic (Developer Mode)</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="text-slate-300 block mb-1 font-semibold">Enjin OCR Pengecaman</label>
                   <select
-                    value={settings.ocrEngine || 'TESSERACT'}
+                    value={settings.ocrEngine || 'ONNX_MODEL'}
                     onChange={(e) => setSettings({ ...settings, ocrEngine: e.target.value as any })}
                     className="w-full bg-[#090a0f] border border-[#252833] rounded-xl px-3 py-2 text-white"
                   >
-                    <option value="TESSERACT">Tesseract.js Alphanumeric Engine</option>
-                    <option value="ONNX_MODEL">Custom ONNX OCR Model (PP-OCR / CRNN)</option>
+                    <option value="ONNX_MODEL">Custom ONNX OCR Model (PP-OCRv5)</option>
+                    <option value="TESSERACT">Tesseract.js Alphanumeric Engine (Fallback)</option>
                   </select>
                 </div>
-              </div>
-
-              <div>
-                <label className="text-slate-300 block mb-1 font-semibold flex items-center gap-1.5">
-                  <Key className="w-3.5 h-3.5 text-[#00d8f6]" />
-                  Roboflow API Key (Universe Project: fyp-hq4ka/license-plate-malaysia-kqy48)
-                </label>
-                <input
-                  type="password"
-                  value={settings.roboflowApiKey || 'QhgkpEMcagyM4hkiKOVl'}
-                  onChange={(e) => setSettings({ ...settings, roboflowApiKey: e.target.value })}
-                  placeholder="Enter Roboflow API Key"
-                  className="w-full bg-[#090a0f] border border-[#252833] rounded-xl px-3 py-2 text-white font-mono text-xs"
-                />
-                <p className="text-[10px] text-slate-400 mt-1">
-                  Model ID: <span className="font-mono text-slate-300">fyp-hq4ka/license-plate-malaysia-kqy48/2</span> (mAP 97.47%)
-                </p>
               </div>
             </div>
           </div>

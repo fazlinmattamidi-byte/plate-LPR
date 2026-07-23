@@ -6,7 +6,6 @@ export const INITIAL_SETTINGS: ScannerSettings = {
   soundEnabled: true,
   vibrationEnabled: true,
   detectorEngine: 'AUTO',
-  roboflowApiKey: 'QhgkpEMcagyM4hkiKOVl',
   ocrEngine: 'ONNX_MODEL',
   detectionThreshold: 0.35,
   recognitionThreshold: 0.60,

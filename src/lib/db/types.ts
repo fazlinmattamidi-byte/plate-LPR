@@ -134,7 +134,6 @@ export interface ScannerSettings {
   soundEnabled: boolean;
   vibrationEnabled: boolean;
   detectorEngine: 'AUTO' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
-  roboflowApiKey: string;
   ocrEngine: 'TESSERACT' | 'ONNX_MODEL';
   detectionThreshold: number;       // 0.0 - 1.0
   recognitionThreshold: number;     // 0.0 - 1.0

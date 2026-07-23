@@ -19,14 +19,16 @@ export interface TrackCropSample {
 export interface ActiveTrack {
   trackId: string;
   trackNumber: number;
-  bbox: BoundingBox;          // Raw detection bbox (used for IoU / matching)
-  smoothBbox: BoundingBox;    // EMA-smoothed bbox (used for UI overlay display)
+  bbox: BoundingBox;          // Raw detection bbox (used for IoU / matching / cropping)
+  smoothBbox: BoundingBox;    // EMA-smoothed bbox (used strictly for UI overlay rendering)
   predictedBbox?: BoundingBox;
   vx: number; // velocity x (pixels per frame)
   vy: number; // velocity y (pixels per frame)
   cropSamples: TrackCropSample[];
   lastSeenFrame: number;
   firstSeenFrame: number;
+  lastSeenTimestamp: number;
+  firstSeenTimestamp: number;
   framesSeen: number;
 
   ocrState: TrackOcrState;
@@ -89,11 +91,15 @@ export class PlateTracker {
   private frameIndex: number = 0;
   private iouThreshold: number = 0.30;
   private lostTrackTimeout: number = 20; // Frames before a confirmed track is pruned (~2s at 10 FPS)
+  private lostTrackTimeoutMs: number = 2000; // Time-based expiration in milliseconds (invariant to FPS drops)
   private maxActiveTracks: number = 8;
   private minConfirmationFrames: number = 2;
 
   constructor(lostTrackTimeout?: number, maxActiveTracks?: number, minConfirmationFrames?: number) {
-    if (lostTrackTimeout !== undefined) this.lostTrackTimeout = lostTrackTimeout;
+    if (lostTrackTimeout !== undefined) {
+      this.lostTrackTimeout = lostTrackTimeout;
+      this.lostTrackTimeoutMs = lostTrackTimeout * 100;
+    }
     if (maxActiveTracks !== undefined) this.maxActiveTracks = maxActiveTracks;
     if (minConfirmationFrames !== undefined) this.minConfirmationFrames = minConfirmationFrames;
   }
@@ -238,16 +244,19 @@ export class PlateTracker {
       if (box.width < 35 || box.height < 10) return;
 
       const num = this.trackCounter++;
+      const now = Date.now();
       const newTrack: ActiveTrack = {
-        trackId: `trk-${num}`,
-        trackNumber: num,
-        bbox: box,
-        smoothBbox: { ...box }, // Initialize smoothBbox to the first raw detection
+        trackId: `TRK-${this.trackCounter++}`,
+        trackNumber: this.trackCounter - 1,
+        bbox: { ...box },
+        smoothBbox: { ...box },
         vx: 0,
         vy: 0,
         cropSamples: [],
         lastSeenFrame: this.frameIndex,
         firstSeenFrame: this.frameIndex,
+        lastSeenTimestamp: now,
+        firstSeenTimestamp: now,
         framesSeen: 1,
         ocrState: 'DETECTED',
         ocrRunning: false,
@@ -259,11 +268,12 @@ export class PlateTracker {
       this.activeTracks.set(newTrack.trackId, newTrack);
     });
 
-    // 6. Remove Stale Tracks
+    // 6. Remove Stale Tracks by Timestamp (2000 ms timeout for confirmed tracks)
+    const now = Date.now();
     this.activeTracks.forEach((track, id) => {
-      const framesLost = this.frameIndex - track.lastSeenFrame;
-      const timeout = track.isConfirmed ? this.lostTrackTimeout : 2; // Unconfirmed expire quickly
-      if (framesLost > timeout) {
+      const timeLostMs = now - (track.lastSeenTimestamp || 0);
+      const timeoutMs = track.isConfirmed ? this.lostTrackTimeoutMs : 600; // Unconfirmed expire quickly (600ms)
+      if (timeLostMs > timeoutMs) {
         this.activeTracks.delete(id);
       }
     });
@@ -283,6 +293,7 @@ export class PlateTracker {
 
   public setLostTrackTimeout(frames: number): void {
     this.lostTrackTimeout = frames;
+    this.lostTrackTimeoutMs = frames * 100;
   }
 
   public clear(): void {

@@ -124,7 +124,7 @@ function mergeAdjacentBoxes(boxes: BoundingBox[]): BoundingBox[] {
               y: newY,
               width: newW,
               height: newH,
-              confidence: Math.max(cur.confidence, b.confidence),
+              confidence: Math.max(cur.confidence || 0, b.confidence || 0),
             };
             mergedIndices.add(j);
             changed = true;
@@ -529,7 +529,7 @@ export function prioritiseTracks(
       const distScore = 1 - Math.min(1, distFromCentre / Math.sqrt(frameArea));
       const areaScore = Math.min(1, area / (frameArea * 0.25));
       const stabilityScore = Math.min(1, t.framesSeen / 15);
-      const confScore = t.bbox.confidence;
+      const confScore = t.bbox.confidence ?? 0.8;
 
       const priority = areaScore * 0.35 + confScore * 0.30 + distScore * 0.20 + stabilityScore * 0.15;
       return { trackId: t.trackId, priority };

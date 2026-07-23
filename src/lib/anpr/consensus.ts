@@ -51,7 +51,40 @@ export function evaluateConsensus(
     }
   });
 
-  const avgConfidence = topCount > 0 ? topTotalConf / topCount : 0;
+  // Character-Position Level Consensus Fallback
+  // If top full-string count is 2 and total votes >= 3, reconstruct plate string position-by-position
+  if (topCount < minRequiredVotes && totalVotes >= minRequiredVotes) {
+    const charPosVotes = new Map<number, Map<string, number>>();
+    track.votes.forEach((data, plateStr) => {
+      for (let i = 0; i < plateStr.length; i++) {
+        const char = plateStr[i];
+        if (!charPosVotes.has(i)) charPosVotes.set(i, new Map());
+        const posMap = charPosVotes.get(i)!;
+        posMap.set(char, (posMap.get(char) || 0) + data.count * data.totalConfidence);
+      }
+    });
+
+    const charList: string[] = [];
+    charPosVotes.forEach((posMap) => {
+      let bestChar = '';
+      let maxScore = -1;
+      posMap.forEach((score, char) => {
+        if (score > maxScore) {
+          maxScore = score;
+          bestChar = char;
+        }
+      });
+      if (bestChar) charList.push(bestChar);
+    });
+
+    const reconstructed = normalizePlate(charList.join(''));
+    if (reconstructed.length >= 2) {
+      topPlate = reconstructed;
+      topCount = minRequiredVotes; // Allow character-level position consensus to satisfy minRequiredVotes
+    }
+  }
+
+  const avgConfidence = topCount > 0 ? topTotalConf / topCount : 0.70;
   const normalized = normalizePlate(topPlate);
   const patternVal = validateMalaysianPattern(normalized);
 

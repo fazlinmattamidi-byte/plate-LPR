@@ -2,9 +2,9 @@
  * PlateQ — Primary Malaysian License Plate Detection Engine
  * Model: YOLOv8 Object Detection (Universe Roboflow: fyp-hq4ka/license-plate-malaysia-kqy48)
  * 
- * Supports:
- * 1. Local ONNX Web Runtime (onnxruntime-web /models/plate-detector.onnx)
- * 2. Computer Vision Heuristic Fallback
+ * Production Hardware Execution Policy:
+ * Preferred Chain: WebGPU -> WASM (WebGL removed from production chain)
+ * Zero silent fallbacks to CV heuristic or remote APIs in production.
  */
 
 import { detectPlateCandidatesCV } from './imageProcessor';
@@ -30,107 +30,150 @@ export interface DetectionOptions {
   developerMode?: boolean;
 }
 
-export interface PlateDetector {
-  initialize(): Promise<boolean>;
-  validate(): Promise<{ valid: boolean; provider?: string }>;
-  detect(canvas: HTMLCanvasElement, options: DetectionOptions): Promise<DetectedPlateBox[]>;
-}
-
+export type DetectorStatus = 'UNINITIALIZED' | 'LOADING' | 'READY' | 'FAILED';
+export type ActiveExecutionProvider = 'WebGPU' | 'WASM' | 'NONE';
 
 let localOnnxSession: any = null;
+let detectorStatus: DetectorStatus = 'UNINITIALIZED';
+let activeProvider: ActiveExecutionProvider = 'NONE';
 let isOnnxLoading = false;
-let onnxLoadFailures = 0;        // Track failures — allow retry after transient errors
-const MAX_ONNX_FAILURES = 3;     // Give up permanently after 3 consecutive failures
+let onnxLoadFailures = 0;
+const MAX_ONNX_FAILURES = 3;
+
+// Inference singletons for zero GC overhead
+let ortModuleCache: any = null;
+let isInferring = false;
+let reusableCanvas: HTMLCanvasElement | null = null;
+let reusableCtx: CanvasRenderingContext2D | null = null;
+let reusableFloat32Data: Float32Array | null = null;
+
+async function getOrt(): Promise<any> {
+  if (!ortModuleCache) {
+    const loadOrt = new Function('return import("onnxruntime-web")');
+    ortModuleCache = await loadOrt();
+  }
+  return ortModuleCache;
+}
+
+export function getDetectorStatus(): DetectorStatus {
+  return detectorStatus;
+}
+
+export function getActiveDetectorProvider(): ActiveExecutionProvider {
+  return activeProvider;
+}
 
 /**
- * Initialize Local ONNX Session if model exists in /models/plate-detector.onnx
+ * Initialize Local ONNX Session with fallback chain: WebGPU -> WASM
  */
 export async function initLocalOnnxSession(): Promise<boolean> {
   if (typeof window === 'undefined') return false;
-  if (localOnnxSession) return true;
-  // Allow retries on transient failures; give up only after MAX_ONNX_FAILURES
-  if (onnxLoadFailures >= MAX_ONNX_FAILURES) return false;
-  // Prevent concurrent load races
+  if (localOnnxSession && detectorStatus === 'READY') return true;
+  if (onnxLoadFailures >= MAX_ONNX_FAILURES) {
+    detectorStatus = 'FAILED';
+    return false;
+  }
   if (isOnnxLoading) return false;
 
   isOnnxLoading = true;
+  detectorStatus = 'LOADING';
 
   try {
-    const loadOrt = new Function('return import("onnxruntime-web")');
-    const ort = await loadOrt();
-    // Use locally-served WASM files (copied from node_modules at build time)
-    // — avoids CDN dependency which is unreliable / slow on mobile networks.
+    const ort = await getOrt();
     ort.env.wasm.wasmPaths = '/ort-wasm/';
-    ort.env.wasm.numThreads = 1; // Single thread WASM to avoid SharedArrayBuffer issues on iOS Safari
+    ort.env.wasm.numThreads = 1; // Single-threaded WASM for universal mobile compatibility
 
-    try {
-      localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
-        executionProviders: ['webgl', 'wasm'],
-        graphOptimizationLevel: 'all',
-      });
-    } catch (e) {
-      console.warn('[ANPR YoloDetector] WebGL init failed on device, falling back to WASM:', e);
-      localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-      });
+    const modelPath = '/models/plate-detector.onnx';
+    const providersToTry: { name: ActiveExecutionProvider; epList: string[] }[] = [
+      { name: 'WebGPU', epList: ['webgpu', 'wasm'] },
+      { name: 'WASM',   epList: ['wasm'] },
+    ];
+
+    for (const item of providersToTry) {
+      try {
+        const session = await ort.InferenceSession.create(modelPath, {
+          executionProviders: item.epList,
+          graphOptimizationLevel: 'all',
+        });
+
+        // Dummy inference to validate session functionality
+        const targetSize = 640;
+        const dummyInput = new ort.Tensor('float32', new Float32Array(3 * targetSize * targetSize), [1, 3, targetSize, targetSize]);
+        const inputName = session.inputNames[0] || 'images';
+        const dummyResults = await session.run({ [inputName]: dummyInput });
+
+        // Clean up dummy tensor output
+        dummyInput.dispose?.();
+        for (const t of Object.values(dummyResults)) {
+          (t as any)?.dispose?.();
+        }
+
+        localOnnxSession = session;
+        activeProvider = item.name;
+        detectorStatus = 'READY';
+        onnxLoadFailures = 0;
+        isOnnxLoading = false;
+        console.log(`[ANPR YoloDetector] Model initialized successfully with provider: ${item.name}`);
+        return true;
+      } catch (err) {
+        console.warn(`[ANPR YoloDetector] Provider ${item.name} failed initialization:`, err);
+      }
     }
 
-    console.log('[ANPR YoloDetector] Local ONNX model loaded successfully.');
-    onnxLoadFailures = 0; // Reset on success
-    isOnnxLoading = false;
-    return true;
+    throw new Error('All execution providers (WebGPU, WASM) failed to run model.');
   } catch (err) {
     onnxLoadFailures++;
-    console.warn(
-      `[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`,
-      err
-    );
     isOnnxLoading = false;
+    detectorStatus = 'FAILED';
+    activeProvider = 'NONE';
+    console.warn(`[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`, err);
     return false;
   }
 }
 
-export async function validateDetector(): Promise<{ valid: boolean; provider?: string }> {
-  if (!localOnnxSession) return { valid: false };
+export async function validateDetector(): Promise<{ valid: boolean; provider?: ActiveExecutionProvider }> {
+  if (!localOnnxSession || detectorStatus !== 'READY') return { valid: false };
   try {
     if (!localOnnxSession.inputNames || !localOnnxSession.outputNames) return { valid: false };
-    // Basic structural checks pass
-    return { valid: true, provider: 'ONNX Web Runtime' };
+    return { valid: true, provider: activeProvider };
   } catch (err) {
     return { valid: false };
   }
 }
 
 /**
- * Detect all visible Malaysian vehicle number plates across the full camera frame.
+ * Detect all visible Malaysian vehicle number plates across the camera frame.
  */
 export async function detectMalaysianPlates(
   canvas: HTMLCanvasElement,
   options: DetectionOptions = {}
 ): Promise<DetectedPlateBox[]> {
-  const minConf = options.minConfidence ?? 0.45;
+  const minConf = options.minConfidence ?? 0.35;
   const pref = options.enginePreference || 'AUTO';
-  const iouThreshold = options.iouThreshold ?? 0.40;
+  const iouThreshold = options.iouThreshold ?? 0.35;
 
-  // 1. Primary Engine: Local ONNX Model (Strict Mode for AUTO and LOCAL_ONNX)
+  // 1. Primary Production Engine: Local ONNX Model ONLY
   if (pref === 'LOCAL_ONNX' || pref === 'AUTO') {
-    if (!localOnnxSession) {
+    if (!localOnnxSession && detectorStatus !== 'FAILED') {
       await initLocalOnnxSession();
     }
-    if (localOnnxSession) {
+    if (localOnnxSession && detectorStatus === 'READY') {
       try {
         return await runLocalOnnxDetection(canvas, minConf, iouThreshold);
       } catch (err) {
         console.warn('[ANPR YoloDetector] Local ONNX inference error:', err);
       }
     }
-    // Return empty while ONNX model is initializing — zero fallbacks
+    // Return empty while ONNX model is initializing or if failed — ZERO silent fallbacks in production
     return [];
   }
 
-  // 2. Explicit CV Heuristic (ONLY if user manually selected CV_HEURISTIC in settings)
+  // 2. Developer Mode Engine: CV Heuristic (Gated strictly by developerMode)
   if (pref === 'CV_HEURISTIC') {
+    if (options.developerMode !== true) {
+      console.warn('[ANPR YoloDetector] CV Heuristic detector requested without developerMode.');
+      return [];
+    }
     const cvCandidates = detectPlateCandidatesCV(canvas, minConf);
     const mapped = cvCandidates.map((c) => ({
       bbox: {
@@ -143,157 +186,235 @@ export async function detectMalaysianPlates(
       label: 'License-Plate',
       sourceEngine: 'CV_HEURISTIC' as const,
     }));
-    return applyFiltersAndNMS(mapped, iouThreshold);
+    return applyFiltersAndNMS(mapped, iouThreshold, canvas.width, canvas.height);
   }
 
   return [];
 }
 
+/**
+ * Benchmark detection helper for WASM admission control
+ */
+export async function runBenchmarkDetection(): Promise<boolean> {
+  if (!localOnnxSession) return false;
+  try {
+    const ort = await getOrt();
+    const targetSize = 640;
+    const dummyInput = new ort.Tensor('float32', new Float32Array(3 * targetSize * targetSize), [1, 3, targetSize, targetSize]);
+    const inputName = localOnnxSession.inputNames[0] || 'images';
+    const dummyResults = await localOnnxSession.run({ [inputName]: dummyInput });
 
+    dummyInput.dispose?.();
+    for (const t of Object.values(dummyResults)) {
+      (t as any)?.dispose?.();
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 /**
- * Run Local ONNX Inference on Canvas frame
+ * Run Local ONNX Inference with Letterboxing Preprocessing & Inverse Transform
  */
 async function runLocalOnnxDetection(
   canvas: HTMLCanvasElement,
   minConfidence: number,
   iouThreshold: number
 ): Promise<DetectedPlateBox[]> {
-  if (!localOnnxSession || typeof window === 'undefined') return [];
+  if (!localOnnxSession || typeof window === 'undefined' || isInferring) return [];
 
-  const loadOrt = new Function('return import("onnxruntime-web")');
-  const ort = await loadOrt();
+  isInferring = true;
   const targetSize = 640;
 
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = targetSize;
-  tempCanvas.height = targetSize;
-  const ctx = tempCanvas.getContext('2d');
-  if (!ctx) return [];
+  // Reuse canvas & 2D context to avoid GC overhead
+  if (!reusableCanvas) {
+    reusableCanvas = document.createElement('canvas');
+    reusableCanvas.width = targetSize;
+    reusableCanvas.height = targetSize;
+    reusableCtx = reusableCanvas.getContext('2d', { willReadFrequently: true });
+  }
 
-  ctx.drawImage(canvas, 0, 0, targetSize, targetSize);
-  const imgData = ctx.getImageData(0, 0, targetSize, targetSize);
+  if (!reusableCtx) {
+    isInferring = false;
+    return [];
+  }
+
+  // 1. Aspect-Ratio Preserving Letterboxing Preprocessing
+  const scale = Math.min(targetSize / canvas.width, targetSize / canvas.height);
+  const drawW = Math.round(canvas.width * scale);
+  const drawH = Math.round(canvas.height * scale);
+  const padX = Math.round((targetSize - drawW) / 2);
+  const padY = Math.round((targetSize - drawH) / 2);
+
+  // Fill canvas neutral gray background
+  reusableCtx.fillStyle = '#7f7f7f';
+  reusableCtx.fillRect(0, 0, targetSize, targetSize);
+  // Draw scaled image centered inside 640x640 letterbox
+  reusableCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, padX, padY, drawW, drawH);
+
+  const imgData = reusableCtx.getImageData(0, 0, targetSize, targetSize);
   const { data } = imgData;
 
-  const float32Data = new Float32Array(3 * targetSize * targetSize);
-  const channelSize = targetSize * targetSize;
-
-  for (let i = 0; i < channelSize; i++) {
-    float32Data[i] = data[i * 4] / 255.0;
-    float32Data[channelSize + i] = data[i * 4 + 1] / 255.0;
-    float32Data[2 * channelSize + i] = data[i * 4 + 2] / 255.0;
+  const channelArea = targetSize * targetSize;
+  if (!reusableFloat32Data || reusableFloat32Data.length !== 3 * channelArea) {
+    reusableFloat32Data = new Float32Array(3 * channelArea);
   }
 
-  const inputTensor = new ort.Tensor('float32', float32Data, [1, 3, targetSize, targetSize]);
-  const inputName = localOnnxSession.inputNames[0] || 'images';
-  const results = await localOnnxSession.run({ [inputName]: inputTensor });
-
-  // Memory Protection: Dispose input tensor after inference
-  if (inputTensor.dispose) inputTensor.dispose();
-
-  const outputName = localOnnxSession.outputNames[0] || 'output0';
-  const outputTensor = results[outputName];
-  if (!outputTensor) return [];
-
-  const dims = outputTensor.dims;
-  const rawData = outputTensor.data as Float32Array;
-  const scaleX = canvas.width / targetSize;
-  const scaleY = canvas.height / targetSize;
-
-  let numAnchors = 8400;
-  let numChannels = 5;
-  let isTransposed = false;
-
-  if (dims.length >= 2) {
-    const d1 = dims[dims.length - 2];
-    const d2 = dims[dims.length - 1];
-    if (d1 > d2) {
-      numAnchors = d1;
-      numChannels = d2;
-      isTransposed = true; // e.g. [1, 8400, 5]
-    } else {
-      numChannels = d1;
-      numAnchors = d2;
-      isTransposed = false; // e.g. [1, 5, 8400]
-    }
+  for (let i = 0; i < channelArea; i++) {
+    reusableFloat32Data[i] = data[i * 4] / 255.0;
+    reusableFloat32Data[channelArea + i] = data[i * 4 + 1] / 255.0;
+    reusableFloat32Data[2 * channelArea + i] = data[i * 4 + 2] / 255.0;
   }
 
-  const hasObjectness = (numChannels === 6 || numChannels === 85);
-  const detections: DetectedPlateBox[] = [];
+  let inputTensor: any = null;
+  let results: any = null;
 
-  // NOTE: Ultralytics YOLOv8 ONNX export (simplify=True) bakes sigmoid activation
-  // into the model graph. Output class confidence values are already in [0,1].
-  // Do NOT apply sigmoid again — double-sigmoid pushes near-zero logits to ~0.5,
-  // flooding the output with thousands of false positive detections.
+  try {
+    const ort = await getOrt();
+    inputTensor = new ort.Tensor('float32', reusableFloat32Data, [1, 3, targetSize, targetSize]);
+    const inputName = localOnnxSession.inputNames[0] || 'images';
 
-  for (let i = 0; i < numAnchors; i++) {
-    let cx, cy, w, h, objConf, classConf;
+    results = await localOnnxSession.run({ [inputName]: inputTensor });
 
-    if (isTransposed) {
-      cx = rawData[i * numChannels + 0] * scaleX;
-      cy = rawData[i * numChannels + 1] * scaleY;
-      w = rawData[i * numChannels + 2] * scaleX;
-      h = rawData[i * numChannels + 3] * scaleY;
-      if (hasObjectness) {
-        objConf = rawData[i * numChannels + 4];  // already sigmoid
-        classConf = rawData[i * numChannels + 5]; // already sigmoid
+    const outputName = localOnnxSession.outputNames[0] || 'output0';
+    const outputTensor = results[outputName];
+    if (!outputTensor) return [];
+
+    const dims = outputTensor.dims;
+    const rawData = outputTensor.data as Float32Array;
+
+    let numAnchors = 8400;
+    let numChannels = 5;
+    let isTransposed = false;
+
+    if (dims.length >= 2) {
+      const d1 = dims[dims.length - 2];
+      const d2 = dims[dims.length - 1];
+      if (d1 > d2) {
+        numAnchors = d1;
+        numChannels = d2;
+        isTransposed = true; // e.g. [1, 8400, 5]
       } else {
-        objConf = 1.0;
-        classConf = rawData[i * numChannels + 4]; // already sigmoid
-      }
-    } else {
-      cx = rawData[0 * numAnchors + i] * scaleX;
-      cy = rawData[1 * numAnchors + i] * scaleY;
-      w = rawData[2 * numAnchors + i] * scaleX;
-      h = rawData[3 * numAnchors + i] * scaleY;
-      if (hasObjectness) {
-        objConf = rawData[4 * numAnchors + i];  // already sigmoid
-        classConf = rawData[5 * numAnchors + i]; // already sigmoid
-      } else {
-        objConf = 1.0;
-        classConf = rawData[4 * numAnchors + i]; // already sigmoid
+        numChannels = d1;
+        numAnchors = d2;
+        isTransposed = false; // e.g. [1, 5, 8400]
       }
     }
 
-    const conf = objConf * classConf;
+    const hasObjectness = (numChannels === 6 || numChannels === 85);
+    const detections: DetectedPlateBox[] = [];
 
-    if (conf >= minConfidence) {
-      detections.push({
-        bbox: {
-          x: Math.round(Math.max(0, cx - w / 2)),
-          y: Math.round(Math.max(0, cy - h / 2)),
-          width: Math.round(w),
-          height: Math.round(h),
-        },
-        confidence: conf,
-        label: 'License-Plate',
-        sourceEngine: 'LOCAL_ONNX',
-      });
+    // Relative Minimum Detection Sizes
+    const minBoxW = Math.max(45, canvas.width * 0.035);
+    const minBoxH = Math.max(12, canvas.height * 0.015);
+
+    for (let i = 0; i < numAnchors; i++) {
+      let cx: number, cy: number, w: number, h: number, objConf: number, classConf: number;
+
+      if (isTransposed) {
+        cx = rawData[i * numChannels + 0];
+        cy = rawData[i * numChannels + 1];
+        w = rawData[i * numChannels + 2];
+        h = rawData[i * numChannels + 3];
+        if (hasObjectness) {
+          objConf = rawData[i * numChannels + 4];
+          classConf = rawData[i * numChannels + 5];
+        } else {
+          objConf = 1.0;
+          classConf = rawData[i * numChannels + 4];
+        }
+      } else {
+        cx = rawData[0 * numAnchors + i];
+        cy = rawData[1 * numAnchors + i];
+        w = rawData[2 * numAnchors + i];
+        h = rawData[3 * numAnchors + i];
+        if (hasObjectness) {
+          objConf = rawData[4 * numAnchors + i];
+          classConf = rawData[5 * numAnchors + i];
+        } else {
+          objConf = 1.0;
+          classConf = rawData[4 * numAnchors + i];
+        }
+      }
+
+      const conf = objConf * classConf;
+
+      // Validate finite numbers
+      if (!Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(w) || !Number.isFinite(h) || !Number.isFinite(conf)) {
+        continue;
+      }
+
+      if (conf >= minConfidence) {
+        // Reverse Letterbox Coordinate Mapping:
+        // (cx, cy, w, h) are in 0..640 letterbox space.
+        // Subtract letterbox padding, then divide by scale factor to map back to original canvas pixels.
+        const realCx = (cx - padX) / scale;
+        const realCy = (cy - padY) / scale;
+        const realW = w / scale;
+        const realH = h / scale;
+
+        // Strict boundary clipping
+        const left = Math.max(0, Math.min(canvas.width, realCx - realW / 2));
+        const top = Math.max(0, Math.min(canvas.height, realCy - realH / 2));
+        const right = Math.max(0, Math.min(canvas.width, realCx + realW / 2));
+        const bottom = Math.max(0, Math.min(canvas.height, realCy + realH / 2));
+
+        const finalW = Math.round(right - left);
+        const finalH = Math.round(bottom - top);
+
+        if (finalW >= minBoxW && finalH >= minBoxH) {
+          detections.push({
+            bbox: {
+              x: Math.round(left),
+              y: Math.round(top),
+              width: finalW,
+              height: finalH,
+            },
+            confidence: Math.round(conf * 1000) / 1000,
+            label: 'License-Plate',
+            sourceEngine: 'LOCAL_ONNX',
+          });
+        }
+      }
     }
+
+    return applyFiltersAndNMS(detections, iouThreshold, canvas.width, canvas.height);
+  } finally {
+    // Memory Disposal Guarantee for CPU/GPU memory
+    inputTensor?.dispose?.();
+    if (results) {
+      for (const tensor of Object.values(results)) {
+        (tensor as any)?.dispose?.();
+      }
+    }
+    isInferring = false;
   }
-
-  // Memory Protection: Dispose output tensor
-  if (outputTensor.dispose) outputTensor.dispose();
-
-  return applyFiltersAndNMS(detections, iouThreshold);
 }
 
-function applyFiltersAndNMS(boxes: DetectedPlateBox[], iouThreshold: number): DetectedPlateBox[] {
-  // 1. Size & Aspect Ratio Filtering
+function applyFiltersAndNMS(
+  boxes: DetectedPlateBox[],
+  iouThreshold: number,
+  canvasWidth: number,
+  canvasHeight: number
+): DetectedPlateBox[] {
+  const minW = Math.max(35, canvasWidth * 0.025);
+  const minH = Math.max(10, canvasHeight * 0.010);
+
   const filtered = boxes.filter(box => {
     const { width, height } = box.bbox;
-    if (width < 30 || height < 10) return false;
+    if (width < minW || height < minH) return false;
     
     const ar = width / height;
-    // single line (~2.0 to 6.0), two line (~0.8 to 2.5) -> overall 0.8 to 6.0
-    if (ar < 0.8 || ar > 6.0) return false;
+    // single line (~2.0 to 6.0), two line (~0.8 to 2.5) -> overall 0.8 to 6.5
+    if (ar < 0.8 || ar > 6.5) return false;
     
     return true;
   });
 
-  // 2. Non-Maximum Suppression with a raised IoU threshold to aggressively
-  //    merge nearby overlapping boxes from the same plate.
-  return applyNMS(filtered, Math.max(iouThreshold, 0.50));
+  // Lower NMS threshold (e.g. 0.35) = MORE aggressive suppression of overlapping boxes
+  const effectiveThreshold = Math.min(iouThreshold, 0.35);
+  return applyNMS(filtered, effectiveThreshold);
 }
 
 function applyNMS(boxes: DetectedPlateBox[], iouThreshold: number): DetectedPlateBox[] {

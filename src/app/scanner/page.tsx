@@ -23,11 +23,15 @@ import { PlateTracker, ActiveTrack } from '@/lib/anpr/tracker';
 import {
   detectMalaysianPlates,
   initLocalOnnxSession,
+  validateDetector,
+  getActiveDetectorProvider,
   DetectedPlateBox,
+  ActiveExecutionProvider,
 } from '@/lib/anpr/yoloDetector';
 import {
   generateAdaptiveCrops,
   cropCanvasRegion,
+  prioritiseTracks,
 } from '@/lib/anpr/imageProcessor';
 import { globalBestFrameSelector } from '@/lib/anpr/bestFrameSelector';
 import { recognizePlateFromCanvas } from '@/lib/anpr/ocrEngine';
@@ -36,7 +40,15 @@ import { playAlertSound, triggerVibration } from '@/lib/utils/audio';
 import { VehicleCase, ScannerSettings } from '@/lib/db/types';
 import { INITIAL_SETTINGS } from '@/lib/db/settingsDefaults';
 import { ModelStatusBanner } from '@/components/scanner/ModelStatusBanner';
-import { initPpOcrSession } from '@/lib/anpr/ppOcrEngine';
+import {
+  initializeANPRRuntime,
+  getANPRRuntimeState,
+  getLatestBenchmarkResult,
+  getRuntimeErrorMessage,
+  ANPRRuntimeState,
+  AdmissionBenchmarkResult,
+} from '@/lib/anpr/runtimeManager';
+import { initPpOcrSession, getActivePpOcrProvider, ActiveOcrProvider } from '@/lib/anpr/ppOcrEngine';
 
 interface MatchEntry {
   type: 'EXACT' | 'POSSIBLE';
@@ -91,8 +103,15 @@ export default function ScannerPage() {
   const isPausedRef = useRef<boolean>(false);
   const [isPaused, setIsPaused] = useState(false);
 
+  // ANPR Production Runtime State Machine
+  const [runtimeState, setRuntimeState] = useState<ANPRRuntimeState>('UNINITIALIZED');
+  const [benchmarkResult, setBenchmarkResult] = useState<AdmissionBenchmarkResult | null>(null);
+  const [runtimeErrorMessage, setRuntimeErrorMessage] = useState<string | null>(null);
+
   // Detector engine state
   const [activeEngine, setActiveEngine] = useState<'LOCAL_ONNX' | 'CV_HEURISTIC'>('LOCAL_ONNX');
+  const [detectorProvider, setDetectorProvider] = useState<ActiveExecutionProvider>('NONE');
+  const [ocrProvider, setOcrProvider] = useState<ActiveOcrProvider>('NONE');
   const [avgConfidence, setAvgConfidence] = useState<number>(0.85);
 
   // Performance metrics
@@ -118,7 +137,17 @@ export default function ScannerPage() {
   const cooldownMap = useRef<Map<string, number>>(new Map());
   const activeOcrCount = useRef(0);
 
-  // ─── 1. Load Settings & Check ONNX Model ───────────────────────────
+  const startRuntimeInit = useCallback(async () => {
+    setRuntimeState('LOADING_MODELS');
+    const res = await initializeANPRRuntime();
+    setRuntimeState(res.state);
+    if (res.benchmark) setBenchmarkResult(res.benchmark);
+    setRuntimeErrorMessage(getRuntimeErrorMessage());
+    setDetectorProvider(getActiveDetectorProvider());
+    setOcrProvider(getActivePpOcrProvider());
+  }, []);
+
+  // ─── 1. Load Settings & Initialize Runtime ───────────────────────────
   useEffect(() => {
     fetch('/api/settings')
       .then(r => r.json())
@@ -130,15 +159,8 @@ export default function ScannerPage() {
       })
       .catch(() => {});
 
-    // Try initializing local ONNX sessions (Detector + PP-OCR)
-    initLocalOnnxSession().then(hasOnnx => {
-      if (hasOnnx) {
-        setActiveEngine('LOCAL_ONNX');
-      }
-    });
-
-    initPpOcrSession().catch(() => {});
-  }, []);
+    startRuntimeInit();
+  }, [startRuntimeInit]);
 
   // ─── 2. Initialise Camera ────────────────────────────────────────────────
   const initCamera = useCallback(async (deviceId?: string) => {
@@ -352,7 +374,6 @@ export default function ScannerPage() {
         const avgConf = detectedPlates.reduce((sum, p) => sum + p.confidence, 0) / detectedPlates.length;
         setAvgConfidence(avgConf);
       } else {
-        const { validateDetector } = await import('@/lib/anpr/yoloDetector');
         const val = await validateDetector();
         if (val.valid) setActiveEngine('LOCAL_ONNX');
       }
@@ -401,9 +422,7 @@ export default function ScannerPage() {
     };
 
     const processOcrQueue = async (confirmedTracks: ActiveTrack[], canvas: HTMLCanvasElement, s: ScannerSettings) => {
-      const { prioritiseTracks: getPriority } = await import('@/lib/anpr/imageProcessor');
-      
-      const priorityIds = getPriority(
+      const priorityIds = prioritiseTracks(
         confirmedTracks.map(t => ({ trackId: t.trackId, bbox: t.bbox, framesSeen: t.framesSeen, ocrState: t.ocrState })),
         canvas.width,
         canvas.height,
@@ -643,7 +662,15 @@ export default function ScannerPage() {
 
       {/* ── MODEL STATUS BANNER ── */}
       <div className="px-3 py-1.5 z-20">
-        <ModelStatusBanner detectorEngine={activeEngine} ocrEngine={settingsRef.current.ocrEngine || 'ONNX_MODEL'} confidenceScore={avgConfidence} />
+        <ModelStatusBanner
+          runtimeState={runtimeState}
+          detectorProvider={detectorProvider}
+          ocrProvider={ocrProvider}
+          benchmark={benchmarkResult}
+          errorMessage={runtimeErrorMessage}
+          onRetry={startRuntimeInit}
+          onManualSearch={() => window.location.href = '/search'}
+        />
       </div>
 
       {/* ── DEBUG PERFORMANCE CHIP ── */}

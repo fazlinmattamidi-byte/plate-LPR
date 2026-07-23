@@ -2,11 +2,10 @@
  * PlateQ — PP-OCR ONNX Recognition Engine
  * Model: PP-OCRv4 / PP-OCRv5 Recognition (public/models/ppocr-rec.onnx)
  * 
- * Performance & Features:
- * - Runs locally via ONNX Runtime Web using WebGPU (fallback to WASM / CPU)
- * - Zero cloud API calls — 100% offline production execution
- * - Greedy CTC Decoder with per-character confidence scores
- * - Supports Single-Line, Two-Line, Square, Motorcycle & Special Malaysian Plates
+ * Production Hardware Execution Policy:
+ * Fallback Chain: WebGPU -> WASM (WebGL removed from production chain)
+ * Dynamic import caching & zero-GC canvas reuse
+ * Guaranteed CPU/GPU memory disposal in try/finally blocks
  */
 
 import { CharacterConfidence, PlateCategory, PlateLayout } from '../db/types';
@@ -27,21 +26,39 @@ export interface PpOcrRecognitionResult {
   engineUsed: 'PP_OCR' | 'TESSERACT';
 }
 
+export type ActiveOcrProvider = 'WebGPU' | 'WASM' | 'NONE';
+
 let ppOcrSession: any = null;
 let dictLines: string[] = [];
 let isSessionLoading = false;
-let sessionLoadFailures = 0;       // Track failures — allow retry after transient errors
-const MAX_SESSION_FAILURES = 3;    // Give up permanently after 3 consecutive failures
+let sessionLoadFailures = 0;
+const MAX_SESSION_FAILURES = 3;
+
+let ortModuleCache: any = null;
+let activeOcrProvider: ActiveOcrProvider = 'NONE';
+let reusableOcrCanvas: HTMLCanvasElement | null = null;
+let reusableOcrCtx: CanvasRenderingContext2D | null = null;
+let reusableOcrFloat32Data: Float32Array | null = null;
+
+async function getOrt(): Promise<any> {
+  if (!ortModuleCache) {
+    const loadOrt = new Function('return import("onnxruntime-web")');
+    ortModuleCache = await loadOrt();
+  }
+  return ortModuleCache;
+}
+
+export function getActivePpOcrProvider(): ActiveOcrProvider {
+  return activeOcrProvider;
+}
 
 /**
- * Initialize PP-OCR ONNX Session with WebGPU -> WASM fallback
+ * Initialize PP-OCR ONNX Session with fallback chain: WebGPU -> WASM
  */
 export async function initPpOcrSession(): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   if (ppOcrSession) return true;
-  // Allow retries on transient failures; give up only after MAX_SESSION_FAILURES
   if (sessionLoadFailures >= MAX_SESSION_FAILURES) return false;
-  // Prevent concurrent load races
   if (isSessionLoading) return false;
 
   isSessionLoading = true;
@@ -57,51 +74,80 @@ export async function initPpOcrSession(): Promise<boolean> {
     }
     const dictText = await dictRes.text();
     dictLines = dictText.split(/\r?\n/).map(l => l.trim());
-    // Append space character at index dictLines.length (index 6624 for ppocr_keys_v1)
-    dictLines.push(' ');
+    dictLines.push(' '); // Append space character at index dictLines.length
 
     // 2. Load ONNX Runtime Web
-    const loadOrt = new Function('return import("onnxruntime-web")');
-    const ort = await loadOrt();
-    // Use locally-served WASM files — avoids CDN dependency on mobile.
+    const ort = await getOrt();
     ort.env.wasm.wasmPaths = '/ort-wasm/';
-    ort.env.wasm.numThreads = 1; // Single-threaded WASM for iOS/mobile compatibility
+    ort.env.wasm.numThreads = 1;
 
-    // Try WebGPU first, then WebGL, then WASM
-    try {
-      ppOcrSession = await ort.InferenceSession.create('/models/ppocr-rec.onnx', {
-        executionProviders: ['webgpu', 'webgl', 'wasm'],
-        graphOptimizationLevel: 'all',
-      });
-      console.log('[PP-OCR] ONNX Session initialized successfully with WebGPU/WebGL!');
-    } catch (e) {
-      console.warn('[PP-OCR] WebGPU/WebGL init failed, falling back to WASM:', e);
-      ppOcrSession = await ort.InferenceSession.create('/models/ppocr-rec.onnx', {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all',
-      });
-      console.log('[PP-OCR] ONNX Session initialized successfully with WASM!');
+    const modelPath = '/models/ppocr-rec.onnx';
+    const providersToTry: { name: ActiveOcrProvider; epList: string[] }[] = [
+      { name: 'WebGPU', epList: ['webgpu', 'wasm'] },
+      { name: 'WASM',   epList: ['wasm'] },
+    ];
+
+    for (const item of providersToTry) {
+      try {
+        const session = await ort.InferenceSession.create(modelPath, {
+          executionProviders: item.epList,
+          graphOptimizationLevel: 'all',
+        });
+
+        // Dummy inference validation
+        const dummyInput = new ort.Tensor('float32', new Float32Array(1 * 3 * 48 * 320), [1, 3, 48, 320]);
+        const inputName = session.inputNames[0] || 'x';
+        const dummyResults = await session.run({ [inputName]: dummyInput });
+
+        dummyInput.dispose?.();
+        for (const t of Object.values(dummyResults)) {
+          (t as any)?.dispose?.();
+        }
+
+        ppOcrSession = session;
+        activeOcrProvider = item.name;
+        sessionLoadFailures = 0;
+        isSessionLoading = false;
+        console.log(`[PP-OCR] ONNX Session initialized successfully with provider: ${item.name}`);
+        return true;
+      } catch (err) {
+        console.warn(`[PP-OCR] Provider ${item.name} failed initialization:`, err);
+      }
     }
 
-    sessionLoadFailures = 0; // Reset on success
-    isSessionLoading = false;
-    return true;
+    throw new Error('All execution providers for PP-OCR failed.');
   } catch (err) {
     sessionLoadFailures++;
-    console.warn(
-      `[PP-OCR] Failed to initialize ONNX session (attempt ${sessionLoadFailures}/${MAX_SESSION_FAILURES}):`,
-      err
-    );
+    activeOcrProvider = 'NONE';
+    console.warn(`[PP-OCR] Failed to initialize ONNX session (attempt ${sessionLoadFailures}/${MAX_SESSION_FAILURES}):`, err);
     isSessionLoading = false;
     return false;
   }
 }
 
-/**
- * Check if PP-OCR ONNX engine is initialized and ready
- */
 export function isPpOcrReady(): boolean {
   return ppOcrSession !== null && dictLines.length > 0;
+}
+
+/**
+ * Benchmark helper for WASM admission control
+ */
+export async function runBenchmarkOcr(): Promise<boolean> {
+  if (!ppOcrSession) return false;
+  try {
+    const ort = await getOrt();
+    const dummyInput = new ort.Tensor('float32', new Float32Array(1 * 3 * 48 * 320), [1, 3, 48, 320]);
+    const inputName = ppOcrSession.inputNames[0] || 'x';
+    const dummyResults = await ppOcrSession.run({ [inputName]: dummyInput });
+
+    dummyInput.dispose?.();
+    for (const t of Object.values(dummyResults)) {
+      (t as any)?.dispose?.();
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 /**
@@ -200,7 +246,7 @@ export async function recognizeWithPpOcr(
 }
 
 /**
- * Execute PP-OCR on a single cropped canvas region
+ * Execute PP-OCR on a single cropped canvas region with Memory Disposal Guarantee
  */
 async function runSingleCropPpOcr(
   canvas: HTMLCanvasElement
@@ -209,22 +255,23 @@ async function runSingleCropPpOcr(
     return { rawText: '', confidence: 0, characterConfidences: [] };
   }
 
-  const loadOrt = new Function('return import("onnxruntime-web")');
-  const ort = await loadOrt();
-
-  // PP-OCR input size: height = 48, width = 320 (or padded)
   const targetH = 48;
   const targetW = 320;
 
-  const prepCanvas = document.createElement('canvas');
-  prepCanvas.width = targetW;
-  prepCanvas.height = targetH;
-  const ctx = prepCanvas.getContext('2d');
-  if (!ctx) return { rawText: '', confidence: 0, characterConfidences: [] };
+  if (!reusableOcrCanvas) {
+    reusableOcrCanvas = document.createElement('canvas');
+    reusableOcrCanvas.width = targetW;
+    reusableOcrCanvas.height = targetH;
+    reusableOcrCtx = reusableOcrCanvas.getContext('2d', { willReadFrequently: true });
+  }
+
+  if (!reusableOcrCtx) {
+    return { rawText: '', confidence: 0, characterConfidences: [] };
+  }
 
   // Fill background neutral gray
-  ctx.fillStyle = '#7f7f7f';
-  ctx.fillRect(0, 0, targetW, targetH);
+  reusableOcrCtx.fillStyle = '#7f7f7f';
+  reusableOcrCtx.fillRect(0, 0, targetW, targetH);
 
   // Maintain aspect ratio scaling
   const scale = Math.min(targetW / canvas.width, targetH / canvas.height);
@@ -233,14 +280,15 @@ async function runSingleCropPpOcr(
   const offsetX = 0;
   const offsetY = Math.round((targetH - drawH) / 2);
 
-  ctx.drawImage(canvas, 0, 0, canvas.width, canvas.height, offsetX, offsetY, drawW, drawH);
+  reusableOcrCtx.drawImage(canvas, 0, 0, canvas.width, canvas.height, offsetX, offsetY, drawW, drawH);
 
-  const imgData = ctx.getImageData(0, 0, targetW, targetH);
+  const imgData = reusableOcrCtx.getImageData(0, 0, targetW, targetH);
   const { data } = imgData;
 
-  // Transform HWC RGBA to CHW Float32Array normalized: (val / 255.0 - 0.5) / 0.5
-  const float32Data = new Float32Array(3 * targetH * targetW);
   const channelArea = targetH * targetW;
+  if (!reusableOcrFloat32Data || reusableOcrFloat32Data.length !== 3 * channelArea) {
+    reusableOcrFloat32Data = new Float32Array(3 * channelArea);
+  }
 
   for (let i = 0; i < channelArea; i++) {
     const r = data[i * 4];
@@ -248,71 +296,79 @@ async function runSingleCropPpOcr(
     const b = data[i * 4 + 2];
 
     // Standard PaddleOCR normalization
-    float32Data[i] = (r / 255.0 - 0.5) / 0.5;
-    float32Data[channelArea + i] = (g / 255.0 - 0.5) / 0.5;
-    float32Data[2 * channelArea + i] = (b / 255.0 - 0.5) / 0.5;
+    reusableOcrFloat32Data[i] = (r / 255.0 - 0.5) / 0.5;
+    reusableOcrFloat32Data[channelArea + i] = (g / 255.0 - 0.5) / 0.5;
+    reusableOcrFloat32Data[2 * channelArea + i] = (b / 255.0 - 0.5) / 0.5;
   }
 
-  const inputTensor = new ort.Tensor('float32', float32Data, [1, 3, targetH, targetW]);
-  const inputName = ppOcrSession.inputNames[0] || 'x';
+  let inputTensor: any = null;
+  let results: any = null;
 
-  const results = await ppOcrSession.run({ [inputName]: inputTensor });
-  
-  if (inputTensor.dispose) inputTensor.dispose(); // Memory Protection
-  
-  const outputName = ppOcrSession.outputNames[0];
-  const outputTensor = results[outputName];
+  try {
+    const ort = await getOrt();
+    inputTensor = new ort.Tensor('float32', reusableOcrFloat32Data, [1, 3, targetH, targetW]);
+    const inputName = ppOcrSession.inputNames[0] || 'x';
 
-  if (!outputTensor) {
-    return { rawText: '', confidence: 0, characterConfidences: [] };
-  }
+    results = await ppOcrSession.run({ [inputName]: inputTensor });
 
-  const rawOutput = outputTensor.data as Float32Array; // shape: [1, seqLen, numClasses]
-  const dims = outputTensor.dims; // e.g. [1, 40, 6625]
-  const seqLen = dims[1] || 40;
-  const numClasses = dims[2] || dictLines.length + 1;
+    const outputName = ppOcrSession.outputNames[0];
+    const outputTensor = results[outputName];
 
-  // CTC Greedy Decoding
-  // PP-OCR ONNX models output softmax_11 probabilities directly.
-  const charList: string[] = [];
-  const charConfs: { char: string; confidence: number }[] = [];
-  let prevIdx = 0;
-
-  for (let t = 0; t < seqLen; t++) {
-    const offset = t * numClasses;
-    let maxIdx = 0;
-    let maxProb = -1;
-
-    for (let c = 0; c < numClasses; c++) {
-      const prob = rawOutput[offset + c];
-      if (prob > maxProb) {
-        maxProb = prob;
-        maxIdx = c;
-      }
+    if (!outputTensor) {
+      return { rawText: '', confidence: 0, characterConfidences: [] };
     }
 
-    if (maxIdx !== 0 && maxIdx !== prevIdx) {
-      if (maxIdx - 1 < dictLines.length) {
-        const char = dictLines[maxIdx - 1];
-        if (char && char !== ' ') {
-          charList.push(char);
-          charConfs.push({ char, confidence: Math.min(1.0, Math.max(0.0, maxProb)) });
+    const rawOutput = outputTensor.data as Float32Array; // shape: [1, seqLen, numClasses]
+    const dims = outputTensor.dims;
+    const seqLen = dims[1] || 40;
+    const numClasses = dims[2] || dictLines.length + 1;
+
+    // CTC Greedy Decoding
+    const charList: string[] = [];
+    const charConfs: { char: string; confidence: number }[] = [];
+    let prevIdx = 0;
+
+    for (let t = 0; t < seqLen; t++) {
+      const offset = t * numClasses;
+      let maxIdx = 0;
+      let maxProb = -1;
+
+      for (let c = 0; c < numClasses; c++) {
+        const prob = rawOutput[offset + c];
+        if (prob > maxProb) {
+          maxProb = prob;
+          maxIdx = c;
         }
       }
+
+      if (maxIdx !== 0 && maxIdx !== prevIdx) {
+        if (maxIdx - 1 < dictLines.length) {
+          const char = dictLines[maxIdx - 1];
+          if (char && char !== ' ') {
+            charList.push(char);
+            charConfs.push({ char, confidence: Math.min(1.0, Math.max(0.0, maxProb)) });
+          }
+        }
+      }
+      prevIdx = maxIdx;
     }
-    prevIdx = maxIdx;
+
+    const rawText = charList.join('');
+    const avgConf = charConfs.length > 0
+      ? charConfs.reduce((sum, c) => sum + c.confidence, 0) / charConfs.length
+      : 0;
+
+    return {
+      rawText,
+      confidence: avgConf,
+      characterConfidences: charConfs,
+    };
+  } finally {
+    inputTensor?.dispose?.();
+    if (results) {
+      for (const tensor of Object.values(results)) {
+        (tensor as any)?.dispose?.();
+      }
+    }
   }
-
-  const rawText = charList.join('');
-  const avgConf = charConfs.length > 0
-    ? charConfs.reduce((sum, c) => sum + c.confidence, 0) / charConfs.length
-    : 0;
-
-  if (outputTensor.dispose) outputTensor.dispose(); // Memory Protection
-
-  return {
-    rawText,
-    confidence: avgConf,
-    characterConfidences: charConfs,
-  };
 }
