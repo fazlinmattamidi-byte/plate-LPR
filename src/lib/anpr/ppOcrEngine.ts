@@ -78,10 +78,25 @@ export async function initPpOcrSession(): Promise<boolean> {
 
     // 2. Load ONNX Runtime Web
     const ort = await getOrt();
-    ort.env.wasm.wasmPaths = '/ort-wasm/';
     ort.env.wasm.numThreads = 1;
+    try {
+      const testHead = await fetch('/ort-wasm/ort-wasm-simd.wasm', { method: 'HEAD' });
+      if (testHead.ok) {
+        ort.env.wasm.wasmPaths = '/ort-wasm/';
+      } else {
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+      }
+    } catch (e) {
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    }
 
-    const modelPath = '/models/ppocr-rec.onnx';
+    const modelRes = await fetch('/models/ppocr-rec.onnx');
+    if (!modelRes.ok) {
+      throw new Error(`HTTP ${modelRes.status} ${modelRes.statusText} fetching /models/ppocr-rec.onnx`);
+    }
+    const modelBuffer = await modelRes.arrayBuffer();
+    const modelBytes = new Uint8Array(modelBuffer);
+
     const providersToTry: { name: ActiveOcrProvider; epList: string[] }[] = [
       { name: 'WebGPU', epList: ['webgpu', 'wasm'] },
       { name: 'WASM',   epList: ['wasm'] },
@@ -89,7 +104,7 @@ export async function initPpOcrSession(): Promise<boolean> {
 
     for (const item of providersToTry) {
       try {
-        const session = await ort.InferenceSession.create(modelPath, {
+        const session = await ort.InferenceSession.create(modelBytes, {
           executionProviders: item.epList,
           graphOptimizationLevel: 'all',
         });

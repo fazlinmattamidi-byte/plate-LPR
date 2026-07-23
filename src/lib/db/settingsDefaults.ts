@@ -26,6 +26,6 @@ export const INITIAL_SETTINGS: ScannerSettings = {
   showPlateCategory: true,
   showRawOcr: true,
   showCharConfidence: true,
-  debugMode: true,
+  debugMode: false,
   demoAssistance: false,
 };

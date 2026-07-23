@@ -660,7 +660,7 @@ export default function ScannerPage() {
         </div>
       </div>
 
-      {/* ── MODEL STATUS BANNER ── */}
+      {/* ── MODEL STATUS BANNER (Only renders on error/degraded or if debugMode is true) ── */}
       <div className="px-3 py-1.5 z-20">
         <ModelStatusBanner
           runtimeState={runtimeState}
@@ -668,14 +668,15 @@ export default function ScannerPage() {
           ocrProvider={ocrProvider}
           benchmark={benchmarkResult}
           errorMessage={runtimeErrorMessage}
+          debugMode={settingsRef.current?.debugMode === true}
           onRetry={startRuntimeInit}
           onManualSearch={() => window.location.href = '/search'}
         />
       </div>
 
-      {/* ── DEBUG PERFORMANCE CHIP ── */}
-      {settingsRef.current?.debugMode !== false && (
-        <div className="absolute top-20 left-3 z-30 flex items-center gap-1.5 text-[10px] font-mono font-bold pointer-events-none">
+      {/* ── DEBUG PERFORMANCE CHIP (Strictly gated behind debugMode === true) ── */}
+      {settingsRef.current?.debugMode === true && (
+        <div className="px-3 py-1 z-20 flex items-center gap-1.5 text-[10px] font-mono font-bold pointer-events-none">
           <span className="px-2 py-0.5 bg-black/70 text-[#00d8f6] rounded border border-[#00d8f6]/30">
             CAM {camFps} FPS
           </span>
@@ -693,18 +694,25 @@ export default function ScannerPage() {
 
       {/* ── MAIN CAMERA CANVAS AREA ── */}
       <div className="flex-1 relative overflow-hidden">
-        {/* TOP MATCH BANNER */}
+        {/* TOP MATCH / READING BANNER */}
         {(() => {
-          const bestTrack = tracksList.find(t => t.isConfirmed && t.stabilizedPlate) || tracksList.find(t => t.stabilizedPlate);
-          if (bestTrack && bestTrack.stabilizedPlate) {
-            const isMatch = bestTrack.matchType === 'EXACT' || bestTrack.matchType === 'POSSIBLE';
-            const statusText = isMatch ? (bestTrack.matchType === 'EXACT' ? 'Exact Match' : 'Possible Match') : 'No Active Match';
+          const activeWithPlate = tracksList.find(t => t.isConfirmed && t.stabilizedPlate) || tracksList.find(t => t.stabilizedPlate);
+          if (activeWithPlate && activeWithPlate.stabilizedPlate) {
+            const isMatch = activeWithPlate.matchType === 'EXACT' || activeWithPlate.matchType === 'POSSIBLE';
+            const badgeBg = isMatch
+              ? (activeWithPlate.matchType === 'EXACT' ? 'bg-rose-950/90 text-rose-300 border-rose-500/50' : 'bg-amber-950/90 text-amber-300 border-amber-500/50')
+              : 'bg-slate-900/90 text-slate-300 border-slate-700';
+
+            const statusLabel = isMatch
+              ? (activeWithPlate.matchType === 'EXACT' ? '🚨 REPO MATCH FOUND' : '⚠️ POSSIBLE MATCH')
+              : '✓ NO MATCH IN DATABASE';
+
             return (
               <div className="absolute top-6 left-1/2 -translate-x-1/2 z-30 transition-all duration-300 pointer-events-none">
-                <div className="bg-[#1a1c23]/95 text-slate-300 px-5 py-2.5 rounded-full font-medium text-sm shadow-2xl border border-white/10 backdrop-blur-md flex items-center gap-2">
-                   <span>{statusText}</span>
-                   <span className="text-slate-500">—</span>
-                   <span className="text-white font-bold tracking-wider">{bestTrack.stabilizedPlate}</span>
+                <div className={`px-5 py-2.5 rounded-full font-semibold text-xs shadow-2xl border backdrop-blur-md flex items-center gap-2 ${badgeBg}`}>
+                   <span className="font-bold">{statusLabel}</span>
+                   <span className="opacity-40">|</span>
+                   <span className="font-mono font-extrabold text-white text-sm tracking-wider">{activeWithPlate.stabilizedPlate}</span>
                 </div>
               </div>
             );
@@ -712,14 +720,25 @@ export default function ScannerPage() {
           return null;
         })()}
 
-        {/* BOTTOM SCANNING BANNER */}
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 transition-all duration-300 pointer-events-none">
-          <div className="bg-[#1a1c23]/95 text-white px-6 py-3 rounded-full font-medium text-sm shadow-2xl border border-white/10 backdrop-blur-md">
-            {tracksList.length === 0 ? "Scanning scene for plates..." : 
-             tracksList.some(t => t.ocrState === 'COLLECTING' || t.ocrState === 'OCR RUNNING') ? "Reading plate..." :
-             tracksList.some(t => t.ocrState === 'CONSENSUS' || t.ocrState === 'DATABASE CHECK') ? "Verifying..." : 
-             "Scanning scene for plates..."}
-          </div>
+        {/* BOTTOM SCANNING STATUS PILL */}
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-30 transition-all duration-300 pointer-events-none">
+          {(() => {
+            const readingTrack = tracksList.find(t => t.ocrState === 'COLLECTING' || t.ocrState === 'OCR_RUNNING' || t.ocrState === 'CONSENSUS_BUILDING');
+            if (readingTrack) {
+              return (
+                <div className="bg-[#00d8f6]/95 text-slate-950 px-6 py-2.5 rounded-full font-bold text-xs shadow-2xl border border-[#00d8f6] backdrop-blur-md flex items-center gap-2 animate-pulse">
+                  <span className="w-2 h-2 rounded-full bg-slate-950 animate-ping" />
+                  <span>Reading plate...</span>
+                </div>
+              );
+            }
+            return (
+              <div className="bg-[#1a1c23]/95 text-slate-200 px-6 py-2.5 rounded-full font-semibold text-xs shadow-2xl border border-white/10 backdrop-blur-md flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span>Scanning scene for plates...</span>
+              </div>
+            );
+          })()}
         </div>
         {cameraError && (
           <div className="absolute inset-0 flex items-center justify-center bg-[#090a0f] z-10 p-6">

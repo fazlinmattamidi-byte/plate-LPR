@@ -80,10 +80,28 @@ export async function initLocalOnnxSession(): Promise<boolean> {
 
   try {
     const ort = await getOrt();
-    ort.env.wasm.wasmPaths = '/ort-wasm/';
-    ort.env.wasm.numThreads = 1; // Single-threaded WASM for universal mobile compatibility
+    
+    // Configure WASM paths with fallback to CDN if local files missing on Vercel
+    ort.env.wasm.numThreads = 1;
+    try {
+      const testHead = await fetch('/ort-wasm/ort-wasm-simd.wasm', { method: 'HEAD' });
+      if (testHead.ok) {
+        ort.env.wasm.wasmPaths = '/ort-wasm/';
+      } else {
+        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+      }
+    } catch (e) {
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    }
 
-    const modelPath = '/models/plate-detector.onnx';
+    // Fetch model into Uint8Array to bypass browser URL fetch restrictions on iOS Safari
+    const modelRes = await fetch('/models/plate-detector.onnx');
+    if (!modelRes.ok) {
+      throw new Error(`HTTP ${modelRes.status} ${modelRes.statusText} fetching /models/plate-detector.onnx`);
+    }
+    const modelBuffer = await modelRes.arrayBuffer();
+    const modelBytes = new Uint8Array(modelBuffer);
+
     const providersToTry: { name: ActiveExecutionProvider; epList: string[] }[] = [
       { name: 'WebGPU', epList: ['webgpu', 'wasm'] },
       { name: 'WASM',   epList: ['wasm'] },
@@ -91,7 +109,7 @@ export async function initLocalOnnxSession(): Promise<boolean> {
 
     for (const item of providersToTry) {
       try {
-        const session = await ort.InferenceSession.create(modelPath, {
+        const session = await ort.InferenceSession.create(modelBytes, {
           executionProviders: item.epList,
           graphOptimizationLevel: 'all',
         });
@@ -121,12 +139,12 @@ export async function initLocalOnnxSession(): Promise<boolean> {
     }
 
     throw new Error('All execution providers (WebGPU, WASM) failed to run model.');
-  } catch (err) {
+  } catch (err: any) {
     onnxLoadFailures++;
     isOnnxLoading = false;
     detectorStatus = 'FAILED';
     activeProvider = 'NONE';
-    console.warn(`[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`, err);
+    console.warn(`[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`, err?.message || err);
     return false;
   }
 }
