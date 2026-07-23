@@ -173,19 +173,62 @@ async function runLocalOnnxDetection(
   const outputTensor = results[outputName];
   if (!outputTensor) return [];
 
+  const dims = outputTensor.dims;
   const rawData = outputTensor.data as Float32Array;
   const scaleX = canvas.width / targetSize;
   const scaleY = canvas.height / targetSize;
 
-  const detections: DetectedPlateBox[] = [];
-  const numDetections = 8400;
+  let numAnchors = 8400;
+  let numChannels = 5;
+  let isTransposed = false;
 
-  for (let i = 0; i < numDetections; i++) {
-    const cx = rawData[i] * scaleX;
-    const cy = rawData[numDetections + i] * scaleY;
-    const w = rawData[2 * numDetections + i] * scaleX;
-    const h = rawData[3 * numDetections + i] * scaleY;
-    const conf = rawData[4 * numDetections + i];
+  if (dims.length >= 2) {
+    const d1 = dims[dims.length - 2];
+    const d2 = dims[dims.length - 1];
+    if (d1 > d2) {
+      numAnchors = d1;
+      numChannels = d2;
+      isTransposed = true; // e.g. [1, 8400, 5]
+    } else {
+      numChannels = d1;
+      numAnchors = d2;
+      isTransposed = false; // e.g. [1, 5, 8400]
+    }
+  }
+
+  const hasObjectness = (numChannels === 6 || numChannels === 85);
+  const detections: DetectedPlateBox[] = [];
+
+  for (let i = 0; i < numAnchors; i++) {
+    let cx, cy, w, h, objConf, classConf;
+
+    if (isTransposed) {
+      cx = rawData[i * numChannels + 0] * scaleX;
+      cy = rawData[i * numChannels + 1] * scaleY;
+      w = rawData[i * numChannels + 2] * scaleX;
+      h = rawData[i * numChannels + 3] * scaleY;
+      if (hasObjectness) {
+        objConf = rawData[i * numChannels + 4];
+        classConf = rawData[i * numChannels + 5];
+      } else {
+        objConf = 1.0;
+        classConf = rawData[i * numChannels + 4];
+      }
+    } else {
+      cx = rawData[0 * numAnchors + i] * scaleX;
+      cy = rawData[1 * numAnchors + i] * scaleY;
+      w = rawData[2 * numAnchors + i] * scaleX;
+      h = rawData[3 * numAnchors + i] * scaleY;
+      if (hasObjectness) {
+        objConf = rawData[4 * numAnchors + i];
+        classConf = rawData[5 * numAnchors + i];
+      } else {
+        objConf = 1.0;
+        classConf = rawData[4 * numAnchors + i];
+      }
+    }
+
+    const conf = objConf * classConf;
 
     if (conf >= minConfidence) {
       detections.push({
