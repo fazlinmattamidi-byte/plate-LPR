@@ -68,7 +68,7 @@ export function detectPlateCandidatesCV(
     }
   }
 
-  const nmsResult = applyNMS(candidates, 0.45);
+  const nmsResult = applyNMS(candidates, 0.15);
   nmsResult.sort((a, b) => b.confidence - a.confidence);
   return nmsResult.slice(0, maxCandidates).map((box) => ({
     crop: box,

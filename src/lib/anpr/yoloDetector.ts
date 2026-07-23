@@ -191,7 +191,7 @@ async function runRoboflowApiDetection(
     });
   }
 
-  return applyNMS(detections, 0.45);
+  return applyNMS(detections, 0.15);
 }
 
 /**
@@ -263,7 +263,7 @@ async function runLocalOnnxDetection(
     }
   }
 
-  return applyNMS(detections, 0.45);
+  return applyNMS(detections, 0.15);
 }
 
 function applyNMS(boxes: DetectedPlateBox[], iouThreshold: number): DetectedPlateBox[] {

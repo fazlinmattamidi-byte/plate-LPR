@@ -63,6 +63,14 @@ export function calculateIoU(boxA: BoundingBox, boxB: BoundingBox): number {
   return interArea / (boxAArea + boxBArea - interArea);
 }
 
+export function calculateCentroidDistance(boxA: BoundingBox, boxB: BoundingBox): number {
+  const cxA = boxA.x + boxA.width / 2;
+  const cyA = boxA.y + boxA.height / 2;
+  const cxB = boxB.x + boxB.width / 2;
+  const cyB = boxB.y + boxB.height / 2;
+  return Math.sqrt(Math.pow(cxA - cxB, 2) + Math.pow(cyA - cyB, 2));
+}
+
 /**
  * ByteTrack-inspired Multi-Object Tracker for Real-Time License Plate Tracking.
  * 
@@ -117,15 +125,25 @@ export class PlateTracker {
 
     // 3. First Stage Association: Match Active Tracks with High Confidence Detections
     this.activeTracks.forEach((track) => {
-      let bestIoU = this.iouThreshold;
+      let bestMatchScore = 0;
       let bestIdx = -1;
 
       highConfDets.forEach(({ box, idx }) => {
         if (!unassignedHigh.has(idx)) return;
         const targetBox = track.predictedBbox || track.bbox;
         const iou = calculateIoU(targetBox, box);
-        if (iou > bestIoU) {
-          bestIoU = iou;
+        const dist = calculateCentroidDistance(targetBox, box);
+        const maxDist = Math.max(targetBox.width, targetBox.height) * 1.5; // Allow jump up to 1.5x size
+
+        let score = 0;
+        if (iou > this.iouThreshold) {
+          score = 1.0 + iou; // prioritize IoU
+        } else if (dist < maxDist) {
+          score = 1.0 - (dist / maxDist); // fallback to distance
+        }
+
+        if (score > bestMatchScore) {
+          bestMatchScore = score;
           bestIdx = idx;
         }
       });
@@ -149,15 +167,25 @@ export class PlateTracker {
     this.activeTracks.forEach((track) => {
       if (track.lastSeenFrame === this.frameIndex) return; // Already updated in Stage 1
 
-      let bestIoU = this.iouThreshold * 0.8;
+      let bestMatchScore = 0;
       let bestIdx = -1;
 
       lowConfDets.forEach(({ box, idx }) => {
         if (!unassignedLow.has(idx)) return;
         const targetBox = track.predictedBbox || track.bbox;
         const iou = calculateIoU(targetBox, box);
-        if (iou > bestIoU) {
-          bestIoU = iou;
+        const dist = calculateCentroidDistance(targetBox, box);
+        const maxDist = Math.max(targetBox.width, targetBox.height) * 1.5;
+
+        let score = 0;
+        if (iou > this.iouThreshold * 0.8) {
+          score = 1.0 + iou;
+        } else if (dist < maxDist) {
+          score = 1.0 - (dist / maxDist);
+        }
+
+        if (score > bestMatchScore) {
+          bestMatchScore = score;
           bestIdx = idx;
         }
       });
