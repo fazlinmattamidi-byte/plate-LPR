@@ -55,7 +55,7 @@ export async function initLocalOnnxSession(): Promise<boolean> {
   try {
     const loadOrt = new Function('return import("onnxruntime-web")');
     const ort = await loadOrt();
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
 
     // Remove HEAD request check because Vercel/CDNs sometimes block HEAD requests for static files
     localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {

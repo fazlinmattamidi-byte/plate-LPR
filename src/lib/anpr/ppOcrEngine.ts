@@ -56,18 +56,10 @@ export async function initPpOcrSession(): Promise<boolean> {
     // Append space character at index dictLines.length (index 6624 for ppocr_keys_v1)
     dictLines.push(' ');
 
-    // 2. Check if ONNX model file exists
-    const modelHead = await fetch('/models/ppocr-rec.onnx', { method: 'HEAD' });
-    if (!modelHead.ok) {
-      console.warn('[PP-OCR] Model /models/ppocr-rec.onnx not found.');
-      isSessionLoading = false;
-      return false;
-    }
-
-    // 3. Load ONNX Runtime Web
+    // 2. Load ONNX Runtime Web
     const loadOrt = new Function('return import("onnxruntime-web")');
     const ort = await loadOrt();
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
 
     // Try WebGPU first, then WebGL, then WASM
     try {
