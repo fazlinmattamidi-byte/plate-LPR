@@ -62,6 +62,12 @@ async function getOrt(): Promise<any> {
   return await ortModuleCache;
 }
 
+let lastPpOcrError: string | null = null;
+
+export function getPpOcrError(): string | null {
+  return lastPpOcrError;
+}
+
 export function getActivePpOcrProvider(): ActiveOcrProvider {
   return activeOcrProvider;
 }
@@ -140,10 +146,11 @@ export async function initPpOcrSession(): Promise<boolean> {
     }
 
     throw new Error('All execution providers for PP-OCR failed.');
-  } catch (err) {
+  } catch (err: any) {
     sessionLoadFailures++;
     activeOcrProvider = 'NONE';
-    console.warn(`[PP-OCR] Failed to initialize ONNX session (attempt ${sessionLoadFailures}/${MAX_SESSION_FAILURES}):`, err);
+    lastPpOcrError = err?.message || String(err);
+    console.warn(`[PP-OCR] Failed to initialize ONNX session (attempt ${sessionLoadFailures}/${MAX_SESSION_FAILURES}):`, lastPpOcrError);
     isSessionLoading = false;
     return false;
   }

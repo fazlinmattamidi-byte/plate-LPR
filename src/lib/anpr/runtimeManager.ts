@@ -95,8 +95,9 @@ export async function initializeANPRRuntime(
     // 2. Initialize Local PP-OCR ONNX Session
     const ocrLoaded = await initPpOcrSession();
     if (!ocrLoaded || !isPpOcrReady()) {
+      const { getPpOcrError } = await import('./ppOcrEngine');
       currentRuntimeState = 'OCR_UNAVAILABLE';
-      runtimeErrorMessage = 'Local PP-OCR ONNX model (/models/ppocr-rec.onnx) failed to load.';
+      runtimeErrorMessage = getPpOcrError() || 'Local PP-OCR ONNX model failed to load.';
       return { state: currentRuntimeState };
     }
 

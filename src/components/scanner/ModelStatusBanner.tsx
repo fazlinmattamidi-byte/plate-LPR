@@ -54,7 +54,9 @@ export const ModelStatusBanner: React.FC<ModelStatusBannerProps> = ({
           ) : isUnavailable ? (
             <>
               <AlertOctagon className="w-4 h-4 text-rose-500 shrink-0" />
-              <span className="font-bold text-rose-400">Detector Loading Issue</span>
+              <span className="font-bold text-rose-400">
+                {runtimeState === 'OCR_UNAVAILABLE' ? 'OCR Engine Loading Issue' : 'Detector Loading Issue'}
+              </span>
             </>
           ) : (
             <>
