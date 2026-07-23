@@ -13,6 +13,10 @@ import {
   Settings as SettingsIcon,
   ChevronDown,
   ChevronUp,
+  LayoutGrid,
+  Search,
+  Camera,
+  Car,
 } from 'lucide-react';
 import Link from 'next/link';
 import { PlateTracker, ActiveTrack } from '@/lib/anpr/tracker';
@@ -510,50 +514,35 @@ export default function ScannerPage() {
       const reading = track.stabilizedPlate || getTrackReadingDisplay(track);
       const displayNum = track.trackNumber;
 
-      ctx.strokeStyle = color;
+      // NEW CLEAN UI DESIGN: White rounded box around plate
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
       ctx.lineWidth = 2.5;
       ctx.setLineDash([]);
-      ctx.strokeRect(x, y, width, height);
-
-      const cl = Math.min(14, width * 0.15, height * 0.25);
-      ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.moveTo(x, y + cl); ctx.lineTo(x, y); ctx.lineTo(x + cl, y);
-      ctx.moveTo(x + width - cl, y); ctx.lineTo(x + width, y); ctx.lineTo(x + width, y + cl);
-      ctx.moveTo(x, y + height - cl); ctx.lineTo(x, y + height); ctx.lineTo(x + cl, y + height);
-      ctx.moveTo(x + width - cl, y + height); ctx.lineTo(x + width, y + height); ctx.lineTo(x + width, y + height - cl);
+      ctx.roundRect(x, y, width, height, 6);
       ctx.stroke();
 
-      const labelY = y > 70 ? y - 4 : y + height + 4;
-      const labelAnchor = y > 70 ? 'bottom' : 'top';
+      const labelText = reading || label;
 
-      const badgeText = reading
-        ? `#${displayNum} ${reading} ${Math.round((track.stabilizedConfidence ?? track.bbox.confidence) * 100)}%`
-        : `#${displayNum} ${label}`;
+      if (labelText) {
+        ctx.font = 'bold 12px sans-serif';
+        const textW = ctx.measureText(labelText).width;
+        const pillW = textW + 20;
+        const pillH = 26;
+        const pillX = x + (width / 2) - (pillW / 2); // Centered above box
+        const pillY = y - pillH - 8;
 
-      ctx.font = 'bold 11px monospace';
-      const textW = ctx.measureText(badgeText).width;
-      const badgeH = 20;
-      const badgeY = labelAnchor === 'bottom' ? labelY - badgeH : labelY;
-      const badgeX = Math.max(0, Math.min(W - textW - 10, x));
+        // Dark semi-transparent pill background
+        ctx.fillStyle = 'rgba(15, 15, 20, 0.85)';
+        ctx.beginPath();
+        ctx.roundRect(pillX, Math.max(2, pillY), pillW, pillH, 13);
+        ctx.fill();
 
-      ctx.fillStyle = color + 'dd';
-      ctx.beginPath();
-      ctx.roundRect(badgeX, badgeY, textW + 10, badgeH, 4);
-      ctx.fill();
-
-      ctx.fillStyle = track.matchType === 'EXACT' || track.matchType === 'POSSIBLE' ? '#fff' : '#0a0a0f';
-      ctx.fillText(badgeText, badgeX + 5, badgeY + 14);
-
-      if (reading && reading !== label) {
-        const statusText = label;
-        ctx.font = 'bold 9px monospace';
-        const sw = ctx.measureText(statusText).width;
-        const sbY = labelAnchor === 'bottom' ? badgeY - 16 : badgeY + badgeH + 2;
-        ctx.fillStyle = color + 'bb';
-        ctx.fillRect(badgeX, sbY, sw + 8, 14);
-        ctx.fillStyle = '#fff';
-        ctx.fillText(statusText, badgeX + 4, sbY + 10);
+        // White text
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(labelText, pillX + pillW / 2, Math.max(2, pillY) + pillH / 2);
       }
     });
   }
@@ -666,6 +655,34 @@ export default function ScannerPage() {
 
       {/* ── MAIN CAMERA CANVAS AREA ── */}
       <div className="flex-1 relative overflow-hidden">
+        {/* TOP MATCH BANNER */}
+        {(() => {
+          const bestTrack = tracksList.find(t => t.isConfirmed && t.stabilizedPlate) || tracksList.find(t => t.stabilizedPlate);
+          if (bestTrack && bestTrack.stabilizedPlate) {
+            const isMatch = bestTrack.matchType === 'EXACT' || bestTrack.matchType === 'POSSIBLE';
+            const statusText = isMatch ? (bestTrack.matchType === 'EXACT' ? 'Exact Match' : 'Possible Match') : 'No Active Match';
+            return (
+              <div className="absolute top-6 left-1/2 -translate-x-1/2 z-30 transition-all duration-300 pointer-events-none">
+                <div className="bg-[#1a1c23]/95 text-slate-300 px-5 py-2.5 rounded-full font-medium text-sm shadow-2xl border border-white/10 backdrop-blur-md flex items-center gap-2">
+                   <span>{statusText}</span>
+                   <span className="text-slate-500">—</span>
+                   <span className="text-white font-bold tracking-wider">{bestTrack.stabilizedPlate}</span>
+                </div>
+              </div>
+            );
+          }
+          return null;
+        })()}
+
+        {/* BOTTOM SCANNING BANNER */}
+        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-30 transition-all duration-300 pointer-events-none">
+          <div className="bg-[#1a1c23]/95 text-white px-6 py-3 rounded-full font-medium text-sm shadow-2xl border border-white/10 backdrop-blur-md">
+            {tracksList.length === 0 ? "Scanning scene for plates..." : 
+             tracksList.some(t => t.ocrState === 'COLLECTING' || t.ocrState === 'OCR RUNNING') ? "Reading plate..." :
+             tracksList.some(t => t.ocrState === 'CONSENSUS' || t.ocrState === 'DATABASE CHECK') ? "Verifying..." : 
+             "Scanning scene for plates..."}
+          </div>
+        </div>
         {cameraError && (
           <div className="absolute inset-0 flex items-center justify-center bg-[#090a0f] z-10 p-6">
             <div className="max-w-sm text-center">
@@ -744,78 +761,35 @@ export default function ScannerPage() {
         )}
       </div>
 
-      {/* ── LIVE RESULTS TRAY ── */}
-      <div className={`flex-shrink-0 bg-[#090a0f]/95 backdrop-blur-lg border-t border-[#252833] transition-all ${trayExpanded ? 'max-h-52' : 'max-h-12'} overflow-hidden`}>
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#252833]">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-extrabold text-white tracking-wide">LIVE RESULTS</span>
-            {activeTracksCount > 0 && (
-              <span className="px-1.5 py-0.5 bg-[#00d8f6] text-slate-950 text-[10px] font-black rounded">
-                {activeTracksCount}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-slate-500 font-mono">
-              {platesVisible} plates visible
-            </span>
-            <button
-              onClick={() => setTrayExpanded(v => !v)}
-              className="p-1 text-slate-400 hover:text-white"
-            >
-              {trayExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
-            </button>
-          </div>
+      {/* ── NEW BOTTOM NAVIGATION BAR (Mockup Layout) ── */}
+      <div className="flex-shrink-0 bg-[#090a0f] border-t border-[#252833] flex flex-col">
+        {/* STATUS INDICATOR */}
+        <div className="flex items-center gap-3 px-6 py-4 border-b border-[#252833]">
+          <div className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+          <span className="text-amber-500 text-xs font-bold tracking-widest uppercase">
+            {tracksList.some(t => t.ocrState === 'COLLECTING' || t.ocrState === 'OCR RUNNING') ? 'READING PLATE' : 'SCANNING SCENE'}
+          </span>
         </div>
-
-        {trayExpanded && (
-          <div className="overflow-y-auto max-h-36 divide-y divide-[#252833]">
-            {tracksList.length === 0 ? (
-              <div className="px-4 py-3 text-xs text-slate-500 text-center">
-                No plates detected. Point camera toward vehicles.
-              </div>
-            ) : (
-              tracksList.map(track => (
-                <div
-                  key={track.trackId}
-                  className="flex items-center gap-3 px-4 py-2 hover:bg-[#16181e] transition-colors"
-                >
-                  <span
-                    className="w-8 text-center text-[10px] font-black rounded px-1 py-0.5 shrink-0"
-                    style={{ background: getTrackColor(track) + '22', color: getTrackColor(track), border: `1px solid ${getTrackColor(track)}44` }}
-                  >
-                    #{track.trackNumber}
-                  </span>
-
-                  <span className="font-mono font-extrabold text-sm text-white w-24 truncate shrink-0">
-                    {track.stabilizedPlate ?? getTrackReadingDisplay(track) ?? '–'}
-                  </span>
-
-                  <span
-                    className="text-[10px] font-bold w-16 shrink-0"
-                    style={{ color: getTrackColor(track) }}
-                  >
-                    {getTrackStatusLabel(track)}
-                  </span>
-
-                  <span className="text-xs text-slate-400 font-mono shrink-0 w-10">
-                    {track.stabilizedConfidence != null
-                      ? `${Math.round(track.stabilizedConfidence * 100)}%`
-                      : track.bbox.confidence > 0
-                      ? `~${Math.round(track.bbox.confidence * 100)}%`
-                      : '–'}
-                  </span>
-
-                  {track.matchedVehicle && (
-                    <span className="text-xs text-slate-400 truncate hidden sm:block">
-                      {track.matchedVehicle.vehicleMake} {track.matchedVehicle.vehicleModel} · {track.matchedVehicle.financeCompany}
-                    </span>
-                  )}
-                </div>
-              ))
-            )}
+        
+        {/* TAB BAR */}
+        <div className="flex items-center justify-around py-3">
+          <Link href="/" className="flex flex-col items-center gap-1.5 p-2 text-slate-500 hover:text-white transition-colors">
+            <LayoutGrid className="w-6 h-6" />
+            <span className="text-[10px] font-medium">Dashboard</span>
+          </Link>
+          <Link href="/search" className="flex flex-col items-center gap-1.5 p-2 text-slate-500 hover:text-white transition-colors">
+            <Search className="w-6 h-6" />
+            <span className="text-[10px] font-medium">Search</span>
+          </Link>
+          <div className="flex flex-col items-center gap-1.5 p-2 text-[#00d8f6]">
+            <Camera className="w-6 h-6" />
+            <span className="text-[10px] font-bold">Scanner</span>
           </div>
-        )}
+          <Link href="/manage" className="flex flex-col items-center gap-1.5 p-2 text-slate-500 hover:text-white transition-colors">
+            <Car className="w-6 h-6" />
+            <span className="text-[10px] font-medium">Manage</span>
+          </Link>
+        </div>
       </div>
 
       {/* ── MATCH DETAIL MODAL ── */}
