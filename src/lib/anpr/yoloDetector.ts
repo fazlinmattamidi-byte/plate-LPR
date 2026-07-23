@@ -55,6 +55,12 @@ async function getOrt(): Promise<any> {
   return ortModuleCache;
 }
 
+let lastDetectorError: string | null = null;
+
+export function getDetectorError(): string | null {
+  return lastDetectorError;
+}
+
 export function getDetectorStatus(): DetectorStatus {
   return detectorStatus;
 }
@@ -144,7 +150,8 @@ export async function initLocalOnnxSession(): Promise<boolean> {
     isOnnxLoading = false;
     detectorStatus = 'FAILED';
     activeProvider = 'NONE';
-    console.warn(`[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`, err?.message || err);
+    lastDetectorError = err?.message || String(err);
+    console.warn(`[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`, lastDetectorError);
     return false;
   }
 }

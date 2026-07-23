@@ -86,8 +86,9 @@ export async function initializeANPRRuntime(
     // 1. Initialize Local YOLO Detector ONNX Session
     const detectorLoaded = await initLocalOnnxSession();
     if (!detectorLoaded || getDetectorStatus() === 'FAILED') {
+      const { getDetectorError } = await import('./yoloDetector');
       currentRuntimeState = 'DETECTOR_UNAVAILABLE';
-      runtimeErrorMessage = 'Local YOLO ONNX detector model (/models/plate-detector.onnx) failed to load.';
+      runtimeErrorMessage = getDetectorError() || 'Local YOLO ONNX detector model failed to load.';
       return { state: currentRuntimeState };
     }
 
