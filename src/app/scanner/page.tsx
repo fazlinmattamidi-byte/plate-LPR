@@ -129,7 +129,8 @@ export default function ScannerPage() {
   const [viewingMatch, setViewingMatch] = useState<MatchEntry | null>(null);
 
   // Settings
-  const settingsRef = useRef<ScannerSettings>({ ...INITIAL_SETTINGS });
+  const settingsRef = useRef<ScannerSettings>({ ...INITIAL_SETTINGS, debugMode: false });
+  const [isDebugMode, setIsDebugMode] = useState<boolean>(false);
 
   const camFrameCount = useRef(0);
   const detFrameCount = useRef(0);
@@ -154,6 +155,7 @@ export default function ScannerPage() {
       .then(data => {
         if (data.success && data.settings) {
           settingsRef.current = { ...settingsRef.current, ...data.settings };
+          setIsDebugMode(!!data.settings.debugMode);
           trackerRef.current.setLostTrackTimeout(data.settings.lostTrackTimeout ?? 20);
         }
       })
@@ -668,14 +670,14 @@ export default function ScannerPage() {
           ocrProvider={ocrProvider}
           benchmark={benchmarkResult}
           errorMessage={runtimeErrorMessage}
-          debugMode={settingsRef.current?.debugMode === true}
+          debugMode={isDebugMode}
           onRetry={startRuntimeInit}
           onManualSearch={() => window.location.href = '/search'}
         />
       </div>
 
       {/* ── DEBUG PERFORMANCE CHIP (Strictly gated behind debugMode === true) ── */}
-      {settingsRef.current?.debugMode === true && (
+      {isDebugMode && (
         <div className="px-3 py-1 z-20 flex items-center gap-1.5 text-[10px] font-mono font-bold pointer-events-none">
           <span className="px-2 py-0.5 bg-black/70 text-[#00d8f6] rounded border border-[#00d8f6]/30">
             CAM {camFps} FPS
