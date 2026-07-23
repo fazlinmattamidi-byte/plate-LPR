@@ -149,7 +149,7 @@ export async function recognizeWithPpOcr(
         position: i,
       }));
 
-      const alternatives = generateCandidatePlates(mergedRaw);
+      const alternatives = generateCandidatePlates(mergedRaw, charConfs);
 
       return {
         text: mergedRaw,
@@ -179,7 +179,7 @@ export async function recognizeWithPpOcr(
     position: i,
   }));
 
-  const alternatives = generateCandidatePlates(normText);
+  const alternatives = generateCandidatePlates(normText, charConfs);
 
   return {
     text: normText,
@@ -254,6 +254,9 @@ async function runSingleCropPpOcr(
   const inputName = ppOcrSession.inputNames[0] || 'x';
 
   const results = await ppOcrSession.run({ [inputName]: inputTensor });
+  
+  if (inputTensor.dispose) inputTensor.dispose(); // Memory Protection
+  
   const outputName = ppOcrSession.outputNames[0];
   const outputTensor = results[outputName];
 
@@ -300,6 +303,8 @@ async function runSingleCropPpOcr(
   const avgConf = charConfs.length > 0
     ? charConfs.reduce((sum, c) => sum + c.confidence, 0) / charConfs.length
     : 0;
+
+  if (outputTensor.dispose) outputTensor.dispose(); // Memory Protection
 
   return {
     rawText,

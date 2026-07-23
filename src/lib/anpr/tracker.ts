@@ -43,6 +43,8 @@ export interface ActiveTrack {
   cooldownActive: boolean;
   lastSearchedAt?: number;
   scanEventId?: string;
+
+  isConfirmed?: boolean;
 }
 
 export function calculateIoU(boxA: BoundingBox, boxB: BoundingBox): number {
@@ -84,13 +86,15 @@ export class PlateTracker {
   private activeTracks: Map<string, ActiveTrack> = new Map();
   private trackCounter: number = 1;
   private frameIndex: number = 0;
-  private iouThreshold: number = 0.20;
-  private lostTrackTimeout: number = 20;
+  private iouThreshold: number = 0.30; // Changed default from 0.20 to 0.30 based on requirements
+  private lostTrackTimeout: number = 8; // Changed default from 20 to 8
   private maxActiveTracks: number = 8;
+  private minConfirmationFrames: number = 2; // Default required frames
 
-  constructor(lostTrackTimeout?: number, maxActiveTracks?: number) {
+  constructor(lostTrackTimeout?: number, maxActiveTracks?: number, minConfirmationFrames?: number) {
     if (lostTrackTimeout !== undefined) this.lostTrackTimeout = lostTrackTimeout;
     if (maxActiveTracks !== undefined) this.maxActiveTracks = maxActiveTracks;
+    if (minConfirmationFrames !== undefined) this.minConfirmationFrames = minConfirmationFrames;
   }
 
   public updateTracks(detectedBoxes: BoundingBox[]): ActiveTrack[] {
@@ -159,6 +163,7 @@ export class PlateTracker {
         track.bbox = matchedBox;
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
+        if (track.framesSeen >= this.minConfirmationFrames) track.isConfirmed = true;
         unassignedHigh.delete(bestIdx);
       }
     });
@@ -195,6 +200,7 @@ export class PlateTracker {
         track.bbox = matchedBox;
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
+        if (track.framesSeen >= this.minConfirmationFrames) track.isConfirmed = true;
         unassignedLow.delete(bestIdx);
       }
     });
@@ -223,6 +229,7 @@ export class PlateTracker {
         ocrJobQueued: false,
         votes: new Map(),
         cooldownActive: false,
+        isConfirmed: false,
       };
       this.activeTracks.set(newTrack.trackId, newTrack);
     });
@@ -230,7 +237,8 @@ export class PlateTracker {
     // 6. Remove Stale Tracks
     this.activeTracks.forEach((track, id) => {
       const framesLost = this.frameIndex - track.lastSeenFrame;
-      if (framesLost > this.lostTrackTimeout) {
+      const timeout = track.isConfirmed ? this.lostTrackTimeout : 2; // Unconfirmed expire quickly
+      if (framesLost > timeout) {
         this.activeTracks.delete(id);
       }
     });
@@ -238,8 +246,10 @@ export class PlateTracker {
     return Array.from(this.activeTracks.values());
   }
 
-  public getActiveTracks(): ActiveTrack[] {
-    return Array.from(this.activeTracks.values());
+  public getActiveTracks(confirmedOnly: boolean = false): ActiveTrack[] {
+    const all = Array.from(this.activeTracks.values());
+    if (confirmedOnly) return all.filter(t => t.isConfirmed);
+    return all;
   }
 
   public getTrack(trackId: string): ActiveTrack | undefined {

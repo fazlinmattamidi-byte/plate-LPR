@@ -23,16 +23,22 @@ export type PlateLayout = 'SINGLE_LINE' | 'TWO_LINE' | 'SQUARE';
 export type TrackOcrState =
   | 'DETECTED'
   | 'COLLECTING'
+  | 'QUALITY READY'
+  | 'OCR RUNNING'
+  | 'CONSENSUS'
+  | 'DATABASE CHECK'
+  | 'MATCHED'
+  | 'NO CASE'
+  | 'POSSIBLE MATCH'
+  | 'LOW QUALITY'
+  | 'COOLDOWN'
   | 'CROP_READY'
   | 'OCR_RUNNING'
   | 'CONSENSUS_BUILDING'
   | 'VALIDATING'
   | 'DB_CHECKING'
-  | 'MATCHED'
-  | 'POSSIBLE_MATCH'
-  | 'NOT_FOUND'
-  | 'COOLDOWN'
-  | 'LOW_CONFIDENCE';
+  | 'LOW_CONFIDENCE'
+  | 'NOT_FOUND';
 
 export interface VehicleCase {
   id: string;

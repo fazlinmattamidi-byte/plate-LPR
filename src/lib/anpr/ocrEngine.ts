@@ -52,10 +52,11 @@ export async function recognizePlateFromCanvas(
     if (ppOcrResult && ppOcrResult.normalizedPlate) {
       return {
         ...ppOcrResult,
-        engineUsed: 'ONNX_MODEL',
+        engineUsed: 'PP_OCR',
       };
     }
 
+    console.warn('[ANPR OcrEngine] PP-OCR failed or unavailable, falling back to Tesseract.js');
     // 2. Optional Fallback Engine: Tesseract.js
     return await recognizeWithTesseract(cropCanvas, isTwoLineHint);
   } catch (err) {

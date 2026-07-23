@@ -29,6 +29,13 @@ export interface DetectionOptions {
   minConfidence?: number;
   iouThreshold?: number;
   enginePreference?: 'AUTO' | 'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
+  developerMode?: boolean;
+}
+
+export interface PlateDetector {
+  initialize(): Promise<boolean>;
+  validate(): Promise<{ valid: boolean; provider?: string }>;
+  detect(canvas: HTMLCanvasElement, options: DetectionOptions): Promise<DetectedPlateBox[]>;
 }
 
 const DEFAULT_API_KEY = 'QhgkpEMcagyM4hkiKOVl';
@@ -74,6 +81,17 @@ export async function initLocalOnnxSession(): Promise<boolean> {
   }
 }
 
+export async function validateDetector(): Promise<{ valid: boolean; provider?: string }> {
+  if (!localOnnxSession) return { valid: false };
+  try {
+    if (!localOnnxSession.inputNames || !localOnnxSession.outputNames) return { valid: false };
+    // Basic structural checks pass
+    return { valid: true, provider: 'ONNX Web Runtime' };
+  } catch (err) {
+    return { valid: false };
+  }
+}
+
 /**
  * Detect all visible Malaysian vehicle number plates across the full camera frame.
  */
@@ -81,47 +99,52 @@ export async function detectMalaysianPlates(
   canvas: HTMLCanvasElement,
   options: DetectionOptions = {}
 ): Promise<DetectedPlateBox[]> {
-  const minConf = options.minConfidence ?? 0.25;
+  const minConf = options.minConfidence ?? 0.45;
   const apiKey = options.apiKey || DEFAULT_API_KEY;
   const pref = options.enginePreference || 'AUTO';
+  const iouThreshold = options.iouThreshold ?? 0.40;
 
   // 1. Try Local ONNX if requested or AUTO
-  if (pref === 'LOCAL_ONNX' || (pref === 'AUTO' && localOnnxSession)) {
-    try {
-      const onnxDetections = await runLocalOnnxDetection(canvas, minConf);
-      if (onnxDetections.length > 0) {
-        return onnxDetections;
+  if (pref === 'LOCAL_ONNX' || pref === 'AUTO') {
+    const validation = await validateDetector();
+    if (validation.valid) {
+      try {
+        const onnxDetections = await runLocalOnnxDetection(canvas, minConf, iouThreshold);
+        if (onnxDetections.length > 0) return onnxDetections;
+      } catch (err) {
+        console.warn('[ANPR YoloDetector] Local ONNX error:', err);
       }
-    } catch (err) {
-      console.warn('[ANPR YoloDetector] Local ONNX error:', err);
     }
   }
 
-  // 2. Try Roboflow Hosted Inference API (Primary Roboflow Model)
+  // 2. Try Roboflow API (Fallback)
   if (pref === 'ROBOFLOW_API' || pref === 'AUTO') {
     try {
-      const apiDetections = await runRoboflowApiDetection(canvas, apiKey, minConf);
-      if (apiDetections.length > 0) {
-        return apiDetections;
-      }
+      const apiDetections = await runRoboflowApiDetection(canvas, apiKey, minConf, iouThreshold);
+      if (apiDetections.length > 0) return apiDetections;
     } catch (err) {
-      // Quiet fail to fallback
+      console.warn('[ANPR YoloDetector] API fallback failed:', err);
     }
   }
 
-  // 3. Computer Vision Heuristic Fallback
-  const cvCandidates = detectPlateCandidatesCV(canvas);
-  return cvCandidates.map((c) => ({
-    bbox: {
-      x: c.crop.x,
-      y: c.crop.y,
-      width: c.crop.width,
-      height: c.crop.height,
-    },
-    confidence: c.confidence,
-    label: 'License-Plate',
-    sourceEngine: 'CV_HEURISTIC',
-  }));
+  // 3. Computer Vision Heuristic (Developer Fallback ONLY)
+  if (options.developerMode || pref === 'CV_HEURISTIC') {
+    const cvCandidates = detectPlateCandidatesCV(canvas, minConf);
+    const mapped = cvCandidates.map((c) => ({
+      bbox: {
+        x: c.crop.x,
+        y: c.crop.y,
+        width: c.crop.width,
+        height: c.crop.height,
+      },
+      confidence: c.confidence,
+      label: 'License-Plate',
+      sourceEngine: 'CV_HEURISTIC' as const,
+    }));
+    return applyFiltersAndNMS(mapped, iouThreshold);
+  }
+
+  return []; // Show Detector Unavailable if nothing works
 }
 
 /**
@@ -130,7 +153,8 @@ export async function detectMalaysianPlates(
 async function runRoboflowApiDetection(
   canvas: HTMLCanvasElement,
   apiKey: string,
-  minConfidence: number
+  minConfidence: number,
+  iouThreshold: number
 ): Promise<DetectedPlateBox[]> {
   const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
   const base64Data = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
@@ -176,8 +200,6 @@ async function runRoboflowApiDetection(
     const clampedW = Math.min(width, origWidth - clampedX);
     const clampedH = Math.min(height, origHeight - clampedY);
 
-    if (clampedW < 15 || clampedH < 10) continue;
-
     detections.push({
       bbox: {
         x: Math.round(clampedX),
@@ -191,7 +213,7 @@ async function runRoboflowApiDetection(
     });
   }
 
-  return applyNMS(detections, 0.15);
+  return applyFiltersAndNMS(detections, iouThreshold);
 }
 
 /**
@@ -199,7 +221,8 @@ async function runRoboflowApiDetection(
  */
 async function runLocalOnnxDetection(
   canvas: HTMLCanvasElement,
-  minConfidence: number
+  minConfidence: number,
+  iouThreshold: number
 ): Promise<DetectedPlateBox[]> {
   if (!localOnnxSession || typeof window === 'undefined') return [];
 
@@ -230,6 +253,9 @@ async function runLocalOnnxDetection(
   const inputName = localOnnxSession.inputNames[0] || 'images';
   const results = await localOnnxSession.run({ [inputName]: inputTensor });
 
+  // Memory Protection: Dispose input tensor after inference
+  if (inputTensor.dispose) inputTensor.dispose();
+
   const outputName = localOnnxSession.outputNames[0] || 'output0';
   const outputTensor = results[outputName];
   if (!outputTensor) return [];
@@ -248,7 +274,7 @@ async function runLocalOnnxDetection(
     const h = rawData[3 * numDetections + i] * scaleY;
     const conf = rawData[4 * numDetections + i];
 
-    if (conf >= minConfidence && w > 15 && h > 10) {
+    if (conf >= minConfidence) {
       detections.push({
         bbox: {
           x: Math.round(Math.max(0, cx - w / 2)),
@@ -263,7 +289,27 @@ async function runLocalOnnxDetection(
     }
   }
 
-  return applyNMS(detections, 0.15);
+  // Memory Protection: Dispose output tensor
+  if (outputTensor.dispose) outputTensor.dispose();
+
+  return applyFiltersAndNMS(detections, iouThreshold);
+}
+
+function applyFiltersAndNMS(boxes: DetectedPlateBox[], iouThreshold: number): DetectedPlateBox[] {
+  // 1. Size & Aspect Ratio Filtering
+  const filtered = boxes.filter(box => {
+    const { width, height } = box.bbox;
+    if (width < 80 || height < 20) return false;
+    
+    const ar = width / height;
+    // single line (~2.0 to 6.0), two line (~0.8 to 2.5) -> overall 0.8 to 6.0
+    if (ar < 0.8 || ar > 6.0) return false;
+    
+    return true;
+  });
+
+  // 2. Non-Maximum Suppression
+  return applyNMS(filtered, iouThreshold);
 }
 
 function applyNMS(boxes: DetectedPlateBox[], iouThreshold: number): DetectedPlateBox[] {

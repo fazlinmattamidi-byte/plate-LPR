@@ -111,4 +111,76 @@ describe('FAT Tests: Tracker Scenarios and Plate Types', () => {
     expect(normalPlate.category).toBe('STANDARD');
     expect(normalPlate.isValid).toBe(true);
   });
+
+  it('FAT Scenario 7: Multi-vehicle validation scaling (1 to 5 plates)', () => {
+    // 1 plate
+    let boxes = [{ x: 10, y: 10, width: 80, height: 30, confidence: 0.9 }];
+    let tracks = tracker.updateTracks(boxes);
+    expect(tracks.length).toBe(1);
+
+    // 2 plates
+    boxes.push({ x: 100, y: 10, width: 80, height: 30, confidence: 0.9 });
+    tracks = tracker.updateTracks(boxes);
+    expect(tracks.length).toBe(2);
+
+    // 3 plates
+    boxes.push({ x: 190, y: 10, width: 80, height: 30, confidence: 0.9 });
+    tracks = tracker.updateTracks(boxes);
+    expect(tracks.length).toBe(3);
+    
+    // 5 plates
+    boxes.push({ x: 280, y: 10, width: 80, height: 30, confidence: 0.9 });
+    boxes.push({ x: 370, y: 10, width: 80, height: 30, confidence: 0.9 });
+    tracks = tracker.updateTracks(boxes);
+    expect(tracks.length).toBe(5);
+
+    // Ensure 5 tracks remain confirmed after minConfirmationFrames (2)
+    tracks = tracker.updateTracks(boxes);
+    expect(tracks.filter(t => t.isConfirmed).length).toBe(5);
+  });
+
+  it('FAT Scenario 8: Rain/Night conditions (intermittent frame drops)', () => {
+    // Vehicle appears
+    let tracks = tracker.updateTracks([{ x: 50, y: 50, width: 80, height: 30, confidence: 0.9 }]);
+    expect(tracks.length).toBe(1);
+    const trackId = tracks[0].trackId;
+    
+    // Confirms on frame 2
+    tracks = tracker.updateTracks([{ x: 52, y: 50, width: 80, height: 30, confidence: 0.9 }]);
+    expect(tracks[0].isConfirmed).toBe(true);
+    
+    // Heavy rain drop out: detector misses the vehicle for 5 frames
+    for(let i = 0; i < 5; i++) {
+      tracks = tracker.updateTracks([]); 
+      // The track should still survive because lostTrackTimeout is 8
+      const track = tracker.getTrack(trackId);
+      expect(track).toBeDefined();
+    }
+    
+    // Vehicle reappears
+    tracks = tracker.updateTracks([{ x: 62, y: 50, width: 80, height: 30, confidence: 0.8 }]);
+    expect(tracks.length).toBe(1);
+    expect(tracks[0].trackId).toBe(trackId);
+    expect(tracks[0].isConfirmed).toBe(true);
+  });
+
+  it('FAT Scenario 9: Performance Benchmark (1000 frames stress test)', () => {
+    const start = performance.now();
+    
+    // 5 moving vehicles over 1000 frames
+    for(let i = 0; i < 1000; i++) {
+      const boxes = [
+        { x: 10 + i%100, y: 10, width: 80, height: 30, confidence: 0.9 },
+        { x: 50 + i%100, y: 60, width: 80, height: 30, confidence: 0.9 },
+        { x: 90 + i%100, y: 110, width: 80, height: 30, confidence: 0.9 },
+        { x: 130 + i%100, y: 160, width: 80, height: 30, confidence: 0.9 },
+        { x: 170 + i%100, y: 210, width: 80, height: 30, confidence: 0.9 },
+      ];
+      tracker.updateTracks(boxes);
+    }
+    
+    const duration = performance.now() - start;
+    // Tracker update is O(N*M). For 5 tracks and 1000 frames, it should be highly efficient (under 50ms)
+    expect(duration).toBeLessThan(100); 
+  });
 });
