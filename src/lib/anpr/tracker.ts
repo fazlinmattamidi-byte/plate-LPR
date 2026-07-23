@@ -137,7 +137,7 @@ export class PlateTracker {
         const targetBox = track.predictedBbox || track.bbox;
         const iou = calculateIoU(targetBox, box);
         const dist = calculateCentroidDistance(targetBox, box);
-        const maxDist = Math.max(targetBox.width, targetBox.height) * 1.5; // Allow jump up to 1.5x size
+        const maxDist = Math.max(targetBox.width, targetBox.height) * 3.0; // Allow jump up to 3.0x size for slow detectors
 
         let score = 0;
         if (iou > this.iouThreshold) {
@@ -180,7 +180,7 @@ export class PlateTracker {
         const targetBox = track.predictedBbox || track.bbox;
         const iou = calculateIoU(targetBox, box);
         const dist = calculateCentroidDistance(targetBox, box);
-        const maxDist = Math.max(targetBox.width, targetBox.height) * 1.5;
+        const maxDist = Math.max(targetBox.width, targetBox.height) * 3.0;
 
         let score = 0;
         if (iou > this.iouThreshold * 0.8) {

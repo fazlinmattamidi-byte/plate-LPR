@@ -127,8 +127,8 @@ export async function detectMalaysianPlates(
     }
   }
 
-  // 3. Computer Vision Heuristic (Developer Fallback ONLY)
-  if (options.developerMode || pref === 'CV_HEURISTIC') {
+  // 3. Computer Vision Heuristic (Explicit Fallback ONLY)
+  if (pref === 'CV_HEURISTIC') {
     const cvCandidates = detectPlateCandidatesCV(canvas, minConf);
     const mapped = cvCandidates.map((c) => ({
       bbox: {
