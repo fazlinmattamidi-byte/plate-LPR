@@ -104,8 +104,8 @@ export default function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, detectorEngine: e.target.value as any })}
                     className="w-full bg-[#090a0f] border border-[#252833] rounded-xl px-3 py-2 text-white"
                   >
-                    <option value="AUTO">AUTO (Roboflow AI → ONNX → CV Fallback)</option>
-                    <option value="ROBOFLOW_API">Roboflow Hosted API (fyp-hq4ka)</option>
+                    <option value="AUTO">AUTO (Local ONNX Model)</option>
+
                     <option value="LOCAL_ONNX">Local ONNX Model (/models/plate-detector.onnx)</option>
                     <option value="CV_HEURISTIC">Computer Vision Heuristic (Offline)</option>
                   </select>

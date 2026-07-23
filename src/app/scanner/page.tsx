@@ -92,7 +92,7 @@ export default function ScannerPage() {
   const [isPaused, setIsPaused] = useState(false);
 
   // Detector engine state
-  const [activeEngine, setActiveEngine] = useState<'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC'>('ROBOFLOW_API');
+  const [activeEngine, setActiveEngine] = useState<'LOCAL_ONNX' | 'CV_HEURISTIC'>('LOCAL_ONNX');
   const [avgConfidence, setAvgConfidence] = useState<number>(0.85);
 
   // Performance metrics
@@ -342,7 +342,6 @@ export default function ScannerPage() {
 
       // ── Step 1: Malaysian Plate Detector ──
       const detectedPlates = await detectMalaysianPlates(canvas, {
-        apiKey: s.roboflowApiKey,
         minConfidence: s.detectionThreshold,
         enginePreference: s.detectorEngine,
         developerMode: s.debugMode,

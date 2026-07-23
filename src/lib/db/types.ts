@@ -133,7 +133,7 @@ export interface ScannerSettings {
   preferredResolution: '720p' | '1080p' | '480p';
   soundEnabled: boolean;
   vibrationEnabled: boolean;
-  detectorEngine: 'AUTO' | 'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
+  detectorEngine: 'AUTO' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
   roboflowApiKey: string;
   ocrEngine: 'TESSERACT' | 'ONNX_MODEL';
   detectionThreshold: number;       // 0.0 - 1.0

@@ -2,7 +2,7 @@ import React from 'react';
 import { Cpu, Cloud, AlertTriangle, Zap } from 'lucide-react';
 
 interface ModelStatusBannerProps {
-  detectorEngine: 'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
+  detectorEngine: 'LOCAL_ONNX' | 'CV_HEURISTIC';
   ocrEngine?: 'ONNX_MODEL' | 'PP_OCR' | 'TESSERACT';
   confidenceScore?: number;
 }
@@ -24,14 +24,6 @@ export const ModelStatusBanner: React.FC<ModelStatusBannerProps> = ({
             <span className="font-bold text-emerald-400">YOLO ONNX Detector</span>
             <span className="px-1.5 py-0.5 bg-emerald-950 border border-emerald-800 rounded text-[9px] font-mono text-emerald-300">
               LOCAL WASM
-            </span>
-          </>
-        ) : detectorEngine === 'ROBOFLOW_API' ? (
-          <>
-            <Cloud className="w-4 h-4 text-blue-400 animate-pulse shrink-0" />
-            <span className="font-bold text-blue-400">YOLOv8 Roboflow AI</span>
-            <span className="px-1.5 py-0.5 bg-blue-950 border border-blue-800 rounded text-[9px] font-mono text-blue-300">
-              CLOUD
             </span>
           </>
         ) : (

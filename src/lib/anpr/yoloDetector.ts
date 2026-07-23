@@ -20,7 +20,7 @@ export interface DetectedPlateBox {
   bbox: BoundingBox;
   confidence: number;
   label: string;
-  sourceEngine: 'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
+  sourceEngine: 'LOCAL_ONNX' | 'CV_HEURISTIC';
 }
 
 export interface DetectionOptions {
@@ -91,7 +91,6 @@ export async function detectMalaysianPlates(
   options: DetectionOptions = {}
 ): Promise<DetectedPlateBox[]> {
   const minConf = options.minConfidence ?? 0.45;
-  const apiKey = options.apiKey || DEFAULT_API_KEY;
   const pref = options.enginePreference || 'AUTO';
   const iouThreshold = options.iouThreshold ?? 0.40;
 
