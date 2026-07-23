@@ -41,11 +41,25 @@ let reusableOcrCtx: CanvasRenderingContext2D | null = null;
 let reusableOcrFloat32Data: Float32Array | null = null;
 
 async function getOrt(): Promise<any> {
+  if (typeof window === 'undefined') return null;
+  if ((window as any).ort) return (window as any).ort;
+
   if (!ortModuleCache) {
-    const loadOrt = new Function('return import("onnxruntime-web")');
-    ortModuleCache = await loadOrt();
+    ortModuleCache = new Promise((resolve, reject) => {
+      if ((window as any).ort) return resolve((window as any).ort);
+
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort.min.js';
+      script.async = true;
+      script.onload = () => {
+        console.log('[ANPR PP-OCR] Loaded onnxruntime-web 1.27.0 via CDN script');
+        resolve((window as any).ort);
+      };
+      script.onerror = () => reject(new Error('Failed to load onnxruntime-web CDN script'));
+      document.head.appendChild(script);
+    });
   }
-  return ortModuleCache;
+  return await ortModuleCache;
 }
 
 export function getActivePpOcrProvider(): ActiveOcrProvider {
