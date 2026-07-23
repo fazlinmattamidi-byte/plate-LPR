@@ -63,7 +63,8 @@ export async function initPpOcrSession(): Promise<boolean> {
     // 2. Load ONNX Runtime Web
     const loadOrt = new Function('return import("onnxruntime-web")');
     const ort = await loadOrt();
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
+    // Use locally-served WASM files — avoids CDN dependency on mobile.
+    ort.env.wasm.wasmPaths = '/ort-wasm/';
 
     // Try WebGPU first, then WebGL, then WASM
     try {

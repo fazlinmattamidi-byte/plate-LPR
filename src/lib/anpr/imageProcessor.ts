@@ -68,9 +68,9 @@ export function detectPlateCandidatesCV(
     }
   }
 
-  const nmsResult = applyNMS(candidates, 0.15);
+  const nmsResult = applyNMS(candidates, 0.40); // Raise IoU threshold: merge boxes from the same plate
   nmsResult.sort((a, b) => b.confidence - a.confidence);
-  return nmsResult.slice(0, maxCandidates).map((box) => ({
+  return nmsResult.slice(0, 4).map((box) => ({   // Limit to 4 — CV is approximate; fewer is cleaner
     crop: box,
     confidence: box.confidence,
   }));

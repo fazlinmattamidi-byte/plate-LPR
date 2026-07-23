@@ -58,7 +58,9 @@ export async function initLocalOnnxSession(): Promise<boolean> {
   try {
     const loadOrt = new Function('return import("onnxruntime-web")');
     const ort = await loadOrt();
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
+    // Use locally-served WASM files (copied from node_modules at build time)
+    // — avoids CDN dependency which is unreliable / slow on mobile networks.
+    ort.env.wasm.wasmPaths = '/ort-wasm/';
 
     localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
       executionProviders: ['webgl', 'wasm'],
@@ -214,8 +216,10 @@ async function runLocalOnnxDetection(
   const hasObjectness = (numChannels === 6 || numChannels === 85);
   const detections: DetectedPlateBox[] = [];
 
-  // YOLOv8 ONNX exports raw pre-sigmoid logits — apply sigmoid to get true [0,1] probabilities
-  const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
+  // NOTE: Ultralytics YOLOv8 ONNX export (simplify=True) bakes sigmoid activation
+  // into the model graph. Output class confidence values are already in [0,1].
+  // Do NOT apply sigmoid again — double-sigmoid pushes near-zero logits to ~0.5,
+  // flooding the output with thousands of false positive detections.
 
   for (let i = 0; i < numAnchors; i++) {
     let cx, cy, w, h, objConf, classConf;
@@ -226,11 +230,11 @@ async function runLocalOnnxDetection(
       w = rawData[i * numChannels + 2] * scaleX;
       h = rawData[i * numChannels + 3] * scaleY;
       if (hasObjectness) {
-        objConf = sigmoid(rawData[i * numChannels + 4]);
-        classConf = sigmoid(rawData[i * numChannels + 5]);
+        objConf = rawData[i * numChannels + 4];  // already sigmoid
+        classConf = rawData[i * numChannels + 5]; // already sigmoid
       } else {
         objConf = 1.0;
-        classConf = sigmoid(rawData[i * numChannels + 4]);
+        classConf = rawData[i * numChannels + 4]; // already sigmoid
       }
     } else {
       cx = rawData[0 * numAnchors + i] * scaleX;
@@ -238,11 +242,11 @@ async function runLocalOnnxDetection(
       w = rawData[2 * numAnchors + i] * scaleX;
       h = rawData[3 * numAnchors + i] * scaleY;
       if (hasObjectness) {
-        objConf = sigmoid(rawData[4 * numAnchors + i]);
-        classConf = sigmoid(rawData[5 * numAnchors + i]);
+        objConf = rawData[4 * numAnchors + i];  // already sigmoid
+        classConf = rawData[5 * numAnchors + i]; // already sigmoid
       } else {
         objConf = 1.0;
-        classConf = sigmoid(rawData[4 * numAnchors + i]);
+        classConf = rawData[4 * numAnchors + i]; // already sigmoid
       }
     }
 
@@ -282,8 +286,9 @@ function applyFiltersAndNMS(boxes: DetectedPlateBox[], iouThreshold: number): De
     return true;
   });
 
-  // 2. Non-Maximum Suppression
-  return applyNMS(filtered, iouThreshold);
+  // 2. Non-Maximum Suppression with a raised IoU threshold to aggressively
+  //    merge nearby overlapping boxes from the same plate.
+  return applyNMS(filtered, Math.max(iouThreshold, 0.50));
 }
 
 function applyNMS(boxes: DetectedPlateBox[], iouThreshold: number): DetectedPlateBox[] {

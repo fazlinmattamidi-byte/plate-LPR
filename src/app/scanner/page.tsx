@@ -411,8 +411,9 @@ export default function ScannerPage() {
         if (!track || !track.isConfirmed || track.ocrRunning || track.cooldownActive) continue;
         if (activeOcrCount.current >= s.maxOcrConcurrency) break;
 
-        // OCR Gating: Need at least 3 frames and decent width
-        if (track.framesSeen < 3 || track.bbox.width < 120) {
+        // OCR Gating: Need at least 2 frames and plate wide enough to read
+        // 60px is the practical minimum for PP-OCR to extract characters on mobile.
+        if (track.framesSeen < 2 || track.bbox.width < 60) {
           track.ocrState = 'COLLECTING';
           continue;
         }
@@ -423,6 +424,8 @@ export default function ScannerPage() {
         if (!targetCrop) continue; // Skip if no crop saved yet
         
         const qualityReport = bestFrameEntry?.quality || { overallScore: 0.6, recommendation: 'PASS' };
+        // Only skip truly unusable frames — MARGINAL frames go through to OCR.
+        // The best-frame selector has already picked the sharpest available crop.
         if (qualityReport.recommendation === 'REJECT') {
           track.ocrState = 'LOW QUALITY';
           continue;
@@ -442,7 +445,10 @@ export default function ScannerPage() {
             const updatedTrack = trackerRef.current.getTrack(trackId);
             if (!updatedTrack || updatedTrack.cooldownActive) return;
 
-            if (text && conf >= 0.45) {
+            // Lower gate: PP-OCR softmax confidence on small/blurry crops
+            // can legitimately be 0.25–0.44 — these are valid reads that should
+            // accumulate into consensus rather than being discarded.
+            if (text && conf >= 0.25) {
               addOcrVoteToTrack(updatedTrack, text, conf, qualityReport.overallScore);
               updatedTrack.ocrState = 'CONSENSUS_BUILDING';
 
@@ -507,7 +513,9 @@ export default function ScannerPage() {
     }
 
     tracks.forEach(track => {
-      const { x, y, width, height } = track.bbox;
+      // Use smoothBbox for display so camera shake doesn't make boxes jitter.
+      // smoothBbox is EMA-interpolated toward the raw detection each frame.
+      const { x, y, width, height } = track.smoothBbox;
       const color = getTrackColor(track);
       const label = getTrackStatusLabel(track);
       const reading = track.stabilizedPlate || getTrackReadingDisplay(track);

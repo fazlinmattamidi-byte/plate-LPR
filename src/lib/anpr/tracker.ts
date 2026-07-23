@@ -19,7 +19,8 @@ export interface TrackCropSample {
 export interface ActiveTrack {
   trackId: string;
   trackNumber: number;
-  bbox: BoundingBox;
+  bbox: BoundingBox;          // Raw detection bbox (used for IoU / matching)
+  smoothBbox: BoundingBox;    // EMA-smoothed bbox (used for UI overlay display)
   predictedBbox?: BoundingBox;
   vx: number; // velocity x (pixels per frame)
   vy: number; // velocity y (pixels per frame)
@@ -86,10 +87,10 @@ export class PlateTracker {
   private activeTracks: Map<string, ActiveTrack> = new Map();
   private trackCounter: number = 1;
   private frameIndex: number = 0;
-  private iouThreshold: number = 0.30; // Changed default from 0.20 to 0.30 based on requirements
-  private lostTrackTimeout: number = 8; // Changed default from 20 to 8
+  private iouThreshold: number = 0.30;
+  private lostTrackTimeout: number = 20; // Frames before a confirmed track is pruned (~2s at 10 FPS)
   private maxActiveTracks: number = 8;
-  private minConfirmationFrames: number = 2; // Default required frames
+  private minConfirmationFrames: number = 2;
 
   constructor(lostTrackTimeout?: number, maxActiveTracks?: number, minConfirmationFrames?: number) {
     if (lostTrackTimeout !== undefined) this.lostTrackTimeout = lostTrackTimeout;
@@ -161,6 +162,18 @@ export class PlateTracker {
         track.vy = track.vy * 0.7 + dy * 0.3;
 
         track.bbox = matchedBox;
+
+        // EMA smoothing for UI display — alpha=0.35 glides toward new position
+        // without snapping, so camera shake doesn't make overlay boxes jump.
+        const a = 0.35;
+        track.smoothBbox = {
+          x: track.smoothBbox.x * (1 - a) + matchedBox.x * a,
+          y: track.smoothBbox.y * (1 - a) + matchedBox.y * a,
+          width: track.smoothBbox.width * (1 - a) + matchedBox.width * a,
+          height: track.smoothBbox.height * (1 - a) + matchedBox.height * a,
+          confidence: matchedBox.confidence,
+        };
+
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
         if (track.framesSeen >= this.minConfirmationFrames || track.bbox.confidence >= 0.70) track.isConfirmed = true;
@@ -198,6 +211,17 @@ export class PlateTracker {
       if (bestIdx !== -1) {
         const matchedBox = detectedBoxes[bestIdx];
         track.bbox = matchedBox;
+
+        // EMA smoothing for stage-2 (low confidence) matches too
+        const a = 0.25; // Slightly less aggressive for low-conf matches
+        track.smoothBbox = {
+          x: track.smoothBbox.x * (1 - a) + matchedBox.x * a,
+          y: track.smoothBbox.y * (1 - a) + matchedBox.y * a,
+          width: track.smoothBbox.width * (1 - a) + matchedBox.width * a,
+          height: track.smoothBbox.height * (1 - a) + matchedBox.height * a,
+          confidence: matchedBox.confidence,
+        };
+
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
         if (track.framesSeen >= this.minConfirmationFrames || track.bbox.confidence >= 0.70) track.isConfirmed = true;
@@ -218,6 +242,7 @@ export class PlateTracker {
         trackId: `trk-${num}`,
         trackNumber: num,
         bbox: box,
+        smoothBbox: { ...box }, // Initialize smoothBbox to the first raw detection
         vx: 0,
         vy: 0,
         cropSamples: [],

@@ -141,28 +141,32 @@ export function assessCropQuality(cropCanvas: HTMLCanvasElement): CropQualityRep
   }
 
   // 5. Calculate Overall Score
+  // Note: motionBlurScore weight is kept low (0.05) because the best-frame selector
+  // already picks the sharpest frame available — we should not double-penalize.
   const overallScore = Math.min(
     1.0,
     Math.max(
       0.0,
-      sharpnessScore * 0.35 +
+      sharpnessScore * 0.40 +
       contrastScore * 0.25 +
       brightnessScore * 0.20 +
       (1.0 - glareScore) * 0.10 +
-      aspectRatioScore * 0.10 -
-      motionBlurScore * 0.15
+      aspectRatioScore * 0.05 -
+      motionBlurScore * 0.05   // Was 0.15 — handheld frames were over-penalized
     )
   );
 
   let recommendation: 'PASS' | 'MARGINAL' | 'REJECT' = 'PASS';
   let reason = 'High quality image crop';
 
-  if (overallScore < 0.35 || blurScore < 30) {
+  // Only hard-REJECT if the frame is truly unusable (extremely blurry).
+  // MARGINAL frames are still passed to OCR — better a marginal read than nothing.
+  if (overallScore < 0.25 || blurScore < 15) {
     recommendation = 'REJECT';
     reason = isBlurry ? 'Excessive blur detected' : 'Low image quality score';
-  } else if (overallScore < 0.55 || glareScore > 0.5) {
+  } else if (overallScore < 0.50 || glareScore > 0.6) {
     recommendation = 'MARGINAL';
-    reason = glareScore > 0.5 ? 'Glare / reflection detected' : 'Moderate blur or contrast';
+    reason = glareScore > 0.6 ? 'Glare / reflection detected' : 'Moderate blur or contrast';
   }
 
   return {
