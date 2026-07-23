@@ -92,6 +92,11 @@ export const ModelStatusBanner: React.FC<ModelStatusBannerProps> = ({
               ? 'Unable to start automatic AI scanning. You can retry initialization or use manual plate search.' 
               : 'Device scanning speed is reduced. Manual plate search is available.'}
           </p>
+          {errorMessage && (
+            <p className="text-[10px] text-rose-300/80 font-mono break-all leading-tight bg-rose-950/30 p-2 rounded-xl border border-rose-900/20">
+              {errorMessage}
+            </p>
+          )}
           <div className="flex items-center gap-2 pt-1">
             {onRetry && (
               <button
