@@ -112,16 +112,18 @@ export async function initPpOcrSession(): Promise<boolean> {
     const modelBuffer = await modelRes.arrayBuffer();
     const modelBytes = new Uint8Array(modelBuffer);
 
-    const providersToTry: { name: ActiveOcrProvider; epList: string[] }[] = [
-      { name: 'WebGPU', epList: ['webgpu', 'wasm'] },
-      { name: 'WASM',   epList: ['wasm'] },
+    let lastErrDetail = '';
+    const configsToTry = [
+      { epList: ['webgpu', 'wasm'], opt: 'all', name: 'WebGPU' as ActiveOcrProvider },
+      { epList: ['wasm'], opt: 'all', name: 'WASM' as ActiveOcrProvider },
+      { epList: ['wasm'], opt: 'basic', name: 'WASM' as ActiveOcrProvider },
     ];
 
-    for (const item of providersToTry) {
+    for (const config of configsToTry) {
       try {
         const session = await ort.InferenceSession.create(modelBytes, {
-          executionProviders: item.epList,
-          graphOptimizationLevel: 'all',
+          executionProviders: config.epList,
+          graphOptimizationLevel: config.opt as any,
         });
 
         // Dummy inference validation
@@ -135,22 +137,23 @@ export async function initPpOcrSession(): Promise<boolean> {
         }
 
         ppOcrSession = session;
-        activeOcrProvider = item.name;
+        activeOcrProvider = config.name;
         sessionLoadFailures = 0;
         isSessionLoading = false;
-        console.log(`[PP-OCR] ONNX Session initialized successfully with provider: ${item.name}`);
+        console.log(`[PP-OCR] ONNX Session initialized successfully with provider: ${config.name} (opt: ${config.opt})`);
         return true;
-      } catch (err) {
-        console.warn(`[PP-OCR] Provider ${item.name} failed initialization:`, err);
+      } catch (err: any) {
+        lastErrDetail = err?.message || String(err);
+        console.warn(`[PP-OCR] Provider ${config.name} (opt: ${config.opt}) failed:`, lastErrDetail);
       }
     }
 
-    throw new Error('All execution providers for PP-OCR failed.');
+    throw new Error(`PP-OCR session creation failed: ${lastErrDetail || 'Unknown error'}`);
   } catch (err: any) {
     sessionLoadFailures++;
     activeOcrProvider = 'NONE';
     lastPpOcrError = err?.message || String(err);
-    console.warn(`[PP-OCR] Failed to initialize ONNX session (attempt ${sessionLoadFailures}/${MAX_SESSION_FAILURES}):`, lastPpOcrError);
+    console.warn(`[PP-OCR] Failed to initialize ONNX session:`, lastPpOcrError);
     isSessionLoading = false;
     return false;
   }
