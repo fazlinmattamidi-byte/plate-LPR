@@ -65,6 +65,7 @@ export async function initPpOcrSession(): Promise<boolean> {
     const ort = await loadOrt();
     // Use locally-served WASM files — avoids CDN dependency on mobile.
     ort.env.wasm.wasmPaths = '/ort-wasm/';
+    ort.env.wasm.numThreads = 1; // Single-threaded WASM for iOS/mobile compatibility
 
     // Try WebGPU first, then WebGL, then WASM
     try {
@@ -271,31 +272,19 @@ async function runSingleCropPpOcr(
   const seqLen = dims[1] || 40;
   const numClasses = dims[2] || dictLines.length + 1;
 
-  // CTC Greedy Decoding with softmax normalization
-  // PP-OCR ONNX models output raw logits — apply softmax over numClasses at each timestep
-  // so that maxProb is a true probability in [0,1] suitable for confidence scoring.
+  // CTC Greedy Decoding
+  // PP-OCR ONNX models output softmax_11 probabilities directly.
   const charList: string[] = [];
   const charConfs: { char: string; confidence: number }[] = [];
   let prevIdx = 0;
 
   for (let t = 0; t < seqLen; t++) {
     const offset = t * numClasses;
-
-    // Softmax over numClasses for this timestep
-    let maxLogit = -Infinity;
-    for (let c = 0; c < numClasses; c++) {
-      if (rawOutput[offset + c] > maxLogit) maxLogit = rawOutput[offset + c];
-    }
-    let expSum = 0;
-    for (let c = 0; c < numClasses; c++) {
-      expSum += Math.exp(rawOutput[offset + c] - maxLogit);
-    }
-
-    // Greedy argmax and probability after softmax
     let maxIdx = 0;
-    let maxProb = 0;
+    let maxProb = -1;
+
     for (let c = 0; c < numClasses; c++) {
-      const prob = Math.exp(rawOutput[offset + c] - maxLogit) / expSum;
+      const prob = rawOutput[offset + c];
       if (prob > maxProb) {
         maxProb = prob;
         maxIdx = c;

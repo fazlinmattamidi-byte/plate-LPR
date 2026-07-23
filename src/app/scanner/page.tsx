@@ -351,6 +351,10 @@ export default function ScannerPage() {
         setActiveEngine(detectedPlates[0].sourceEngine);
         const avgConf = detectedPlates.reduce((sum, p) => sum + p.confidence, 0) / detectedPlates.length;
         setAvgConfidence(avgConf);
+      } else {
+        const { validateDetector } = await import('@/lib/anpr/yoloDetector');
+        const val = await validateDetector();
+        if (val.valid) setActiveEngine('LOCAL_ONNX');
       }
 
       const bboxList = detectedPlates.map(p => ({

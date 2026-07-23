@@ -2,7 +2,7 @@ import { createWorker, Worker } from 'tesseract.js';
 import { normalizePlate, formatDisplayPlate, generateCandidatePlates } from './normaliser';
 import { validateMalaysianPattern } from './patterns';
 import { CharacterConfidence, PlateCategory, PlateLayout } from '../db/types';
-import { recognizeWithPpOcr } from './ppOcrEngine';
+import { recognizeWithPpOcr, isPpOcrReady } from './ppOcrEngine';
 
 let workerPromise: Promise<Worker> | null = null;
 
@@ -47,20 +47,18 @@ export async function recognizePlateFromCanvas(
   isTwoLineHint?: boolean
 ): Promise<OcrRecognitionResult> {
   try {
-    // 1. Primary Engine: Local PP-OCR ONNX Model
+    // Primary Engine: Local PP-OCR ONNX Model ONLY
     const ppOcrResult = await recognizeWithPpOcr(cropCanvas, isTwoLineHint);
-    if (ppOcrResult && ppOcrResult.normalizedPlate) {
+    if (ppOcrResult) {
       return {
         ...ppOcrResult,
         engineUsed: 'PP_OCR',
       };
     }
 
-    console.warn('[ANPR OcrEngine] PP-OCR failed or unavailable, falling back to Tesseract.js');
-    // 2. Optional Fallback Engine: Tesseract.js
-    return await recognizeWithTesseract(cropCanvas, isTwoLineHint);
+    return createEmptyResult();
   } catch (err) {
-    console.warn('[ANPR OcrEngine] Error in recognition router:', err);
+    console.warn('[ANPR OcrEngine] Error in PP-OCR recognition:', err);
     return createEmptyResult();
   }
 }

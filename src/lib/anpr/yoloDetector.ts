@@ -61,11 +61,20 @@ export async function initLocalOnnxSession(): Promise<boolean> {
     // Use locally-served WASM files (copied from node_modules at build time)
     // — avoids CDN dependency which is unreliable / slow on mobile networks.
     ort.env.wasm.wasmPaths = '/ort-wasm/';
+    ort.env.wasm.numThreads = 1; // Single thread WASM to avoid SharedArrayBuffer issues on iOS Safari
 
-    localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
-      executionProviders: ['webgl', 'wasm'],
-      graphOptimizationLevel: 'all',
-    });
+    try {
+      localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
+        executionProviders: ['webgl', 'wasm'],
+        graphOptimizationLevel: 'all',
+      });
+    } catch (e) {
+      console.warn('[ANPR YoloDetector] WebGL init failed on device, falling back to WASM:', e);
+      localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+      });
+    }
 
     console.log('[ANPR YoloDetector] Local ONNX model loaded successfully.');
     onnxLoadFailures = 0; // Reset on success
@@ -104,28 +113,24 @@ export async function detectMalaysianPlates(
   const pref = options.enginePreference || 'AUTO';
   const iouThreshold = options.iouThreshold ?? 0.40;
 
-  // 1. Try Local ONNX if requested or AUTO
+  // 1. Primary Engine: Local ONNX Model (Strict Mode for AUTO and LOCAL_ONNX)
   if (pref === 'LOCAL_ONNX' || pref === 'AUTO') {
-    // Attempt (re-)initialization if session is not yet loaded
     if (!localOnnxSession) {
       await initLocalOnnxSession();
     }
-    const validation = await validateDetector();
-    if (validation.valid) {
+    if (localOnnxSession) {
       try {
-        const onnxDetections = await runLocalOnnxDetection(canvas, minConf, iouThreshold);
-        if (onnxDetections.length > 0) return onnxDetections;
-        // ONNX loaded but found nothing — still try CV in AUTO mode below
+        return await runLocalOnnxDetection(canvas, minConf, iouThreshold);
       } catch (err) {
-        console.warn('[ANPR YoloDetector] Local ONNX error:', err);
+        console.warn('[ANPR YoloDetector] Local ONNX inference error:', err);
       }
     }
+    // Return empty while ONNX model is initializing — zero fallbacks
+    return [];
   }
 
-  // 2. Computer Vision Heuristic
-  // - Always engaged when pref === 'CV_HEURISTIC'
-  // - Also engaged in AUTO mode when ONNX is unavailable or finds nothing
-  if (pref === 'CV_HEURISTIC' || pref === 'AUTO') {
+  // 2. Explicit CV Heuristic (ONLY if user manually selected CV_HEURISTIC in settings)
+  if (pref === 'CV_HEURISTIC') {
     const cvCandidates = detectPlateCandidatesCV(canvas, minConf);
     const mapped = cvCandidates.map((c) => ({
       bbox: {
@@ -141,7 +146,7 @@ export async function detectMalaysianPlates(
     return applyFiltersAndNMS(mapped, iouThreshold);
   }
 
-  return []; // Only reached if pref === 'LOCAL_ONNX' and model unavailable
+  return [];
 }
 
 

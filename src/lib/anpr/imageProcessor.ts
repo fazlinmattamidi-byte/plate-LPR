@@ -68,12 +68,76 @@ export function detectPlateCandidatesCV(
     }
   }
 
-  const nmsResult = applyNMS(candidates, 0.40); // Raise IoU threshold: merge boxes from the same plate
-  nmsResult.sort((a, b) => b.confidence - a.confidence);
-  return nmsResult.slice(0, 4).map((box) => ({   // Limit to 4 — CV is approximate; fewer is cleaner
+  const nmsResult = applyNMS(candidates, 0.30);
+  const mergedResult = mergeAdjacentBoxes(nmsResult);
+  mergedResult.sort((a, b) => b.confidence - a.confidence);
+  return mergedResult.slice(0, 3).map((box) => ({
     crop: box,
     confidence: box.confidence,
   }));
+}
+
+/**
+ * Merges horizontally aligned and adjacent candidate boxes (e.g. "YA" and "8055" on the same plate).
+ */
+function mergeAdjacentBoxes(boxes: BoundingBox[]): BoundingBox[] {
+  if (boxes.length <= 1) return boxes;
+  let result = [...boxes];
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    const nextList: BoundingBox[] = [];
+    const mergedIndices = new Set<number>();
+
+    for (let i = 0; i < result.length; i++) {
+      if (mergedIndices.has(i)) continue;
+      let cur = { ...result[i] };
+
+      for (let j = i + 1; j < result.length; j++) {
+        if (mergedIndices.has(j)) continue;
+        const b = result[j];
+
+        // Check vertical overlap (same row/line)
+        const yOverlap = Math.max(0, Math.min(cur.y + cur.height, b.y + b.height) - Math.max(cur.y, b.y));
+        const minH = Math.min(cur.height, b.height);
+        const isVerticallyAligned = minH > 0 && (yOverlap / minH) > 0.4;
+
+        // Check horizontal proximity (gap between boxes)
+        const curRight = cur.x + cur.width;
+        const bRight = b.x + b.width;
+        const gap = Math.max(0, Math.max(cur.x, b.x) - Math.min(curRight, bRight));
+        const maxW = Math.max(cur.width, b.width);
+        const isHorizontallyClose = gap < maxW * 1.2;
+
+        if (isVerticallyAligned && isHorizontallyClose) {
+          const newX = Math.min(cur.x, b.x);
+          const newY = Math.min(cur.y, b.y);
+          const newW = Math.max(curRight, bRight) - newX;
+          const newH = Math.max(cur.y + cur.height, b.y + b.height) - newY;
+          
+          // Verify aspect ratio of merged box is still realistic for a plate (0.8 to 6.5)
+          const mergedAR = newW / Math.max(1, newH);
+          if (mergedAR >= 0.8 && mergedAR <= 6.5) {
+            cur = {
+              x: newX,
+              y: newY,
+              width: newW,
+              height: newH,
+              confidence: Math.max(cur.confidence, b.confidence),
+            };
+            mergedIndices.add(j);
+            changed = true;
+          }
+        }
+      }
+      mergedIndices.add(i);
+      nextList.push(cur);
+    }
+    result = nextList;
+  }
+
+  return result;
 }
 
 /**
