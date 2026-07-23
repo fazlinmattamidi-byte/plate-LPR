@@ -30,7 +30,8 @@ export interface PpOcrRecognitionResult {
 let ppOcrSession: any = null;
 let dictLines: string[] = [];
 let isSessionLoading = false;
-let sessionLoadAttempted = false;
+let sessionLoadFailures = 0;       // Track failures — allow retry after transient errors
+const MAX_SESSION_FAILURES = 3;    // Give up permanently after 3 consecutive failures
 
 /**
  * Initialize PP-OCR ONNX Session with WebGPU -> WASM fallback
@@ -38,9 +39,11 @@ let sessionLoadAttempted = false;
 export async function initPpOcrSession(): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   if (ppOcrSession) return true;
-  if (sessionLoadAttempted) return false;
+  // Allow retries on transient failures; give up only after MAX_SESSION_FAILURES
+  if (sessionLoadFailures >= MAX_SESSION_FAILURES) return false;
+  // Prevent concurrent load races
+  if (isSessionLoading) return false;
 
-  sessionLoadAttempted = true;
   isSessionLoading = true;
 
   try {
@@ -48,6 +51,7 @@ export async function initPpOcrSession(): Promise<boolean> {
     const dictRes = await fetch('/models/ppocr-dict.txt');
     if (!dictRes.ok) {
       console.warn('[PP-OCR] Dictionary /models/ppocr-dict.txt not found.');
+      sessionLoadFailures++;
       isSessionLoading = false;
       return false;
     }
@@ -77,10 +81,15 @@ export async function initPpOcrSession(): Promise<boolean> {
       console.log('[PP-OCR] ONNX Session initialized successfully with WASM!');
     }
 
+    sessionLoadFailures = 0; // Reset on success
     isSessionLoading = false;
     return true;
   } catch (err) {
-    console.warn('[PP-OCR] Failed to initialize ONNX session:', err);
+    sessionLoadFailures++;
+    console.warn(
+      `[PP-OCR] Failed to initialize ONNX session (attempt ${sessionLoadFailures}/${MAX_SESSION_FAILURES}):`,
+      err
+    );
     isSessionLoading = false;
     return false;
   }
@@ -261,18 +270,31 @@ async function runSingleCropPpOcr(
   const seqLen = dims[1] || 40;
   const numClasses = dims[2] || dictLines.length + 1;
 
-  // CTC Greedy Decoding
+  // CTC Greedy Decoding with softmax normalization
+  // PP-OCR ONNX models output raw logits — apply softmax over numClasses at each timestep
+  // so that maxProb is a true probability in [0,1] suitable for confidence scoring.
   const charList: string[] = [];
   const charConfs: { char: string; confidence: number }[] = [];
   let prevIdx = 0;
 
   for (let t = 0; t < seqLen; t++) {
     const offset = t * numClasses;
-    let maxIdx = 0;
-    let maxProb = -Infinity;
 
+    // Softmax over numClasses for this timestep
+    let maxLogit = -Infinity;
     for (let c = 0; c < numClasses; c++) {
-      const prob = rawOutput[offset + c];
+      if (rawOutput[offset + c] > maxLogit) maxLogit = rawOutput[offset + c];
+    }
+    let expSum = 0;
+    for (let c = 0; c < numClasses; c++) {
+      expSum += Math.exp(rawOutput[offset + c] - maxLogit);
+    }
+
+    // Greedy argmax and probability after softmax
+    let maxIdx = 0;
+    let maxProb = 0;
+    for (let c = 0; c < numClasses; c++) {
+      const prob = Math.exp(rawOutput[offset + c] - maxLogit) / expSum;
       if (prob > maxProb) {
         maxProb = prob;
         maxIdx = c;

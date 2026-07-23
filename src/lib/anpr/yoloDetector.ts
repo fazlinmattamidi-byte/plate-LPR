@@ -39,7 +39,8 @@ export interface PlateDetector {
 
 let localOnnxSession: any = null;
 let isOnnxLoading = false;
-let onnxLoadAttempted = false;
+let onnxLoadFailures = 0;        // Track failures — allow retry after transient errors
+const MAX_ONNX_FAILURES = 3;     // Give up permanently after 3 consecutive failures
 
 /**
  * Initialize Local ONNX Session if model exists in /models/plate-detector.onnx
@@ -47,9 +48,11 @@ let onnxLoadAttempted = false;
 export async function initLocalOnnxSession(): Promise<boolean> {
   if (typeof window === 'undefined') return false;
   if (localOnnxSession) return true;
-  if (onnxLoadAttempted) return false;
+  // Allow retries on transient failures; give up only after MAX_ONNX_FAILURES
+  if (onnxLoadFailures >= MAX_ONNX_FAILURES) return false;
+  // Prevent concurrent load races
+  if (isOnnxLoading) return false;
 
-  onnxLoadAttempted = true;
   isOnnxLoading = true;
 
   try {
@@ -57,16 +60,21 @@ export async function initLocalOnnxSession(): Promise<boolean> {
     const ort = await loadOrt();
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
 
-    // Remove HEAD request check because Vercel/CDNs sometimes block HEAD requests for static files
     localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
       executionProviders: ['webgl', 'wasm'],
       graphOptimizationLevel: 'all',
     });
 
+    console.log('[ANPR YoloDetector] Local ONNX model loaded successfully.');
+    onnxLoadFailures = 0; // Reset on success
     isOnnxLoading = false;
     return true;
   } catch (err) {
-    console.warn('[ANPR YoloDetector] Local ONNX model not loaded, using API/CV fallback:', err);
+    onnxLoadFailures++;
+    console.warn(
+      `[ANPR YoloDetector] Local ONNX load failed (attempt ${onnxLoadFailures}/${MAX_ONNX_FAILURES}):`,
+      err
+    );
     isOnnxLoading = false;
     return false;
   }
@@ -96,19 +104,26 @@ export async function detectMalaysianPlates(
 
   // 1. Try Local ONNX if requested or AUTO
   if (pref === 'LOCAL_ONNX' || pref === 'AUTO') {
+    // Attempt (re-)initialization if session is not yet loaded
+    if (!localOnnxSession) {
+      await initLocalOnnxSession();
+    }
     const validation = await validateDetector();
     if (validation.valid) {
       try {
         const onnxDetections = await runLocalOnnxDetection(canvas, minConf, iouThreshold);
         if (onnxDetections.length > 0) return onnxDetections;
+        // ONNX loaded but found nothing — still try CV in AUTO mode below
       } catch (err) {
         console.warn('[ANPR YoloDetector] Local ONNX error:', err);
       }
     }
   }
 
-  // 2. Computer Vision Heuristic (Explicit Fallback ONLY)
-  if (pref === 'CV_HEURISTIC') {
+  // 2. Computer Vision Heuristic
+  // - Always engaged when pref === 'CV_HEURISTIC'
+  // - Also engaged in AUTO mode when ONNX is unavailable or finds nothing
+  if (pref === 'CV_HEURISTIC' || pref === 'AUTO') {
     const cvCandidates = detectPlateCandidatesCV(canvas, minConf);
     const mapped = cvCandidates.map((c) => ({
       bbox: {
@@ -124,7 +139,7 @@ export async function detectMalaysianPlates(
     return applyFiltersAndNMS(mapped, iouThreshold);
   }
 
-  return []; // Show Detector Unavailable if nothing works
+  return []; // Only reached if pref === 'LOCAL_ONNX' and model unavailable
 }
 
 
@@ -199,6 +214,9 @@ async function runLocalOnnxDetection(
   const hasObjectness = (numChannels === 6 || numChannels === 85);
   const detections: DetectedPlateBox[] = [];
 
+  // YOLOv8 ONNX exports raw pre-sigmoid logits — apply sigmoid to get true [0,1] probabilities
+  const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
+
   for (let i = 0; i < numAnchors; i++) {
     let cx, cy, w, h, objConf, classConf;
 
@@ -208,11 +226,11 @@ async function runLocalOnnxDetection(
       w = rawData[i * numChannels + 2] * scaleX;
       h = rawData[i * numChannels + 3] * scaleY;
       if (hasObjectness) {
-        objConf = rawData[i * numChannels + 4];
-        classConf = rawData[i * numChannels + 5];
+        objConf = sigmoid(rawData[i * numChannels + 4]);
+        classConf = sigmoid(rawData[i * numChannels + 5]);
       } else {
         objConf = 1.0;
-        classConf = rawData[i * numChannels + 4];
+        classConf = sigmoid(rawData[i * numChannels + 4]);
       }
     } else {
       cx = rawData[0 * numAnchors + i] * scaleX;
@@ -220,11 +238,11 @@ async function runLocalOnnxDetection(
       w = rawData[2 * numAnchors + i] * scaleX;
       h = rawData[3 * numAnchors + i] * scaleY;
       if (hasObjectness) {
-        objConf = rawData[4 * numAnchors + i];
-        classConf = rawData[5 * numAnchors + i];
+        objConf = sigmoid(rawData[4 * numAnchors + i]);
+        classConf = sigmoid(rawData[5 * numAnchors + i]);
       } else {
         objConf = 1.0;
-        classConf = rawData[4 * numAnchors + i];
+        classConf = sigmoid(rawData[4 * numAnchors + i]);
       }
     }
 
