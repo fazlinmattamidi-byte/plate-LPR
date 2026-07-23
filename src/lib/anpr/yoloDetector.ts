@@ -87,17 +87,12 @@ export async function initLocalOnnxSession(): Promise<boolean> {
   try {
     const ort = await getOrt();
     
-    // Configure WASM paths with fallback to CDN if local files missing on Vercel
+    // Configure WASM paths to match installed onnxruntime-web version (1.27.0)
     ort.env.wasm.numThreads = 1;
-    try {
-      const testHead = await fetch('/ort-wasm/ort-wasm-simd.wasm', { method: 'HEAD' });
-      if (testHead.ok) {
-        ort.env.wasm.wasmPaths = '/ort-wasm/';
-      } else {
-        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
-      }
-    } catch (e) {
-      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+      ort.env.wasm.wasmPaths = '/ort-wasm/';
+    } else {
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
     }
 
     // Fetch model into Uint8Array to bypass browser URL fetch restrictions on iOS Safari

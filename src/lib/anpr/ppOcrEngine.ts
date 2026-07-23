@@ -79,15 +79,10 @@ export async function initPpOcrSession(): Promise<boolean> {
     // 2. Load ONNX Runtime Web
     const ort = await getOrt();
     ort.env.wasm.numThreads = 1;
-    try {
-      const testHead = await fetch('/ort-wasm/ort-wasm-simd.wasm', { method: 'HEAD' });
-      if (testHead.ok) {
-        ort.env.wasm.wasmPaths = '/ort-wasm/';
-      } else {
-        ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
-      }
-    } catch (e) {
-      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
+    if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
+      ort.env.wasm.wasmPaths = '/ort-wasm/';
+    } else {
+      ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/';
     }
 
     const modelRes = await fetch('/models/ppocr-rec.onnx');
