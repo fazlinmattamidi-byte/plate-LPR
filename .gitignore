@@ -35,8 +35,7 @@ next-env.d.ts
 # local app data
 /.data/
 
-# ML Models (too large for git)
-public/models/*.onnx
+# ML Models
 _rf_tmp/
 runs/
 *.pt
