@@ -163,7 +163,7 @@ export class PlateTracker {
         track.bbox = matchedBox;
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
-        if (track.framesSeen >= this.minConfirmationFrames) track.isConfirmed = true;
+        if (track.framesSeen >= this.minConfirmationFrames || track.bbox.confidence >= 0.70) track.isConfirmed = true;
         unassignedHigh.delete(bestIdx);
       }
     });
@@ -200,7 +200,7 @@ export class PlateTracker {
         track.bbox = matchedBox;
         track.lastSeenFrame = this.frameIndex;
         track.framesSeen++;
-        if (track.framesSeen >= this.minConfirmationFrames) track.isConfirmed = true;
+        if (track.framesSeen >= this.minConfirmationFrames || track.bbox.confidence >= 0.70) track.isConfirmed = true;
         unassignedLow.delete(bestIdx);
       }
     });
@@ -229,7 +229,7 @@ export class PlateTracker {
         ocrJobQueued: false,
         votes: new Map(),
         cooldownActive: false,
-        isConfirmed: false,
+        isConfirmed: box.confidence >= 0.70, // Instantly confirm high confidence plates
       };
       this.activeTracks.set(newTrack.trackId, newTrack);
     });

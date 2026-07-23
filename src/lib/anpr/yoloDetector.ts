@@ -3,9 +3,8 @@
  * Model: YOLOv8 Object Detection (Universe Roboflow: fyp-hq4ka/license-plate-malaysia-kqy48)
  * 
  * Supports:
- * 1. Roboflow Hosted Inference API (Real-time Cloud AI)
- * 2. Local ONNX Web Runtime (onnxruntime-web /models/plate-detector.onnx)
- * 3. Computer Vision Heuristic Fallback
+ * 1. Local ONNX Web Runtime (onnxruntime-web /models/plate-detector.onnx)
+ * 2. Computer Vision Heuristic Fallback
  */
 
 import { detectPlateCandidatesCV } from './imageProcessor';
@@ -25,10 +24,9 @@ export interface DetectedPlateBox {
 }
 
 export interface DetectionOptions {
-  apiKey?: string;
   minConfidence?: number;
   iouThreshold?: number;
-  enginePreference?: 'AUTO' | 'ROBOFLOW_API' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
+  enginePreference?: 'AUTO' | 'LOCAL_ONNX' | 'CV_HEURISTIC';
   developerMode?: boolean;
 }
 
@@ -38,8 +36,6 @@ export interface PlateDetector {
   detect(canvas: HTMLCanvasElement, options: DetectionOptions): Promise<DetectedPlateBox[]>;
 }
 
-const DEFAULT_API_KEY = 'QhgkpEMcagyM4hkiKOVl';
-const MODEL_ENDPOINT = 'https://detect.roboflow.com/license-plate-malaysia-kqy48/2';
 
 let localOnnxSession: any = null;
 let isOnnxLoading = false;
@@ -61,12 +57,7 @@ export async function initLocalOnnxSession(): Promise<boolean> {
     const ort = await loadOrt();
     ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
 
-    const res = await fetch('/models/plate-detector.onnx', { method: 'HEAD' });
-    if (!res.ok) {
-      isOnnxLoading = false;
-      return false;
-    }
-
+    // Remove HEAD request check because Vercel/CDNs sometimes block HEAD requests for static files
     localOnnxSession = await ort.InferenceSession.create('/models/plate-detector.onnx', {
       executionProviders: ['webgl', 'wasm'],
       graphOptimizationLevel: 'all',
@@ -117,17 +108,7 @@ export async function detectMalaysianPlates(
     }
   }
 
-  // 2. Try Roboflow API (Fallback)
-  if (pref === 'ROBOFLOW_API' || pref === 'AUTO') {
-    try {
-      const apiDetections = await runRoboflowApiDetection(canvas, apiKey, minConf, iouThreshold);
-      if (apiDetections.length > 0) return apiDetections;
-    } catch (err) {
-      console.warn('[ANPR YoloDetector] API fallback failed:', err);
-    }
-  }
-
-  // 3. Computer Vision Heuristic (Explicit Fallback ONLY)
+  // 2. Computer Vision Heuristic (Explicit Fallback ONLY)
   if (pref === 'CV_HEURISTIC') {
     const cvCandidates = detectPlateCandidatesCV(canvas, minConf);
     const mapped = cvCandidates.map((c) => ({
@@ -147,74 +128,7 @@ export async function detectMalaysianPlates(
   return []; // Show Detector Unavailable if nothing works
 }
 
-/**
- * Run Roboflow Hosted Inference API on Canvas frame
- */
-async function runRoboflowApiDetection(
-  canvas: HTMLCanvasElement,
-  apiKey: string,
-  minConfidence: number,
-  iouThreshold: number
-): Promise<DetectedPlateBox[]> {
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-  const base64Data = dataUrl.replace(/^data:image\/jpeg;base64,/, '');
 
-  const url = `${MODEL_ENDPOINT}?api_key=${apiKey}&confidence=${Math.round(minConfidence * 100)}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: base64Data,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Roboflow API returned status ${response.status}`);
-  }
-
-  const result = await response.json();
-  if (!result.predictions || !Array.isArray(result.predictions)) {
-    return [];
-  }
-
-  const origWidth = canvas.width;
-  const origHeight = canvas.height;
-  const modelWidth = result.image?.width || origWidth;
-  const modelHeight = result.image?.height || origHeight;
-
-  const scaleX = origWidth / modelWidth;
-  const scaleY = origHeight / modelHeight;
-
-  const detections: DetectedPlateBox[] = [];
-
-  for (const pred of result.predictions) {
-    if (pred.confidence < minConfidence) continue;
-
-    const width = pred.width * scaleX;
-    const height = pred.height * scaleY;
-    const x = (pred.x * scaleX) - (width / 2);
-    const y = (pred.y * scaleY) - (height / 2);
-
-    const clampedX = Math.max(0, Math.min(x, origWidth - 10));
-    const clampedY = Math.max(0, Math.min(y, origHeight - 10));
-    const clampedW = Math.min(width, origWidth - clampedX);
-    const clampedH = Math.min(height, origHeight - clampedY);
-
-    detections.push({
-      bbox: {
-        x: Math.round(clampedX),
-        y: Math.round(clampedY),
-        width: Math.round(clampedW),
-        height: Math.round(clampedH),
-      },
-      confidence: pred.confidence,
-      label: pred.class || 'License-Plate',
-      sourceEngine: 'ROBOFLOW_API',
-    });
-  }
-
-  return applyFiltersAndNMS(detections, iouThreshold);
-}
 
 /**
  * Run Local ONNX Inference on Canvas frame
@@ -299,7 +213,7 @@ function applyFiltersAndNMS(boxes: DetectedPlateBox[], iouThreshold: number): De
   // 1. Size & Aspect Ratio Filtering
   const filtered = boxes.filter(box => {
     const { width, height } = box.bbox;
-    if (width < 80 || height < 20) return false;
+    if (width < 30 || height < 10) return false;
     
     const ar = width / height;
     // single line (~2.0 to 6.0), two line (~0.8 to 2.5) -> overall 0.8 to 6.0
