@@ -32,6 +32,7 @@ import { playAlertSound, triggerVibration } from '@/lib/utils/audio';
 import { VehicleCase, ScannerSettings } from '@/lib/db/types';
 import { INITIAL_SETTINGS } from '@/lib/db/settingsDefaults';
 import { ModelStatusBanner } from '@/components/scanner/ModelStatusBanner';
+import { initPpOcrSession } from '@/lib/anpr/ppOcrEngine';
 
 interface MatchEntry {
   type: 'EXACT' | 'POSSIBLE';
@@ -125,12 +126,14 @@ export default function ScannerPage() {
       })
       .catch(() => {});
 
-    // Try initializing local ONNX session
+    // Try initializing local ONNX sessions (Detector + PP-OCR)
     initLocalOnnxSession().then(hasOnnx => {
       if (hasOnnx) {
         setActiveEngine('LOCAL_ONNX');
       }
     });
+
+    initPpOcrSession().catch(() => {});
   }, []);
 
   // ─── 2. Initialise Camera ────────────────────────────────────────────────
@@ -631,7 +634,7 @@ export default function ScannerPage() {
 
       {/* ── MODEL STATUS BANNER ── */}
       <div className="px-3 py-1.5 z-20">
-        <ModelStatusBanner detectorEngine={activeEngine} confidenceScore={avgConfidence} />
+        <ModelStatusBanner detectorEngine={activeEngine} ocrEngine={settingsRef.current.ocrEngine || 'ONNX_MODEL'} confidenceScore={avgConfidence} />
       </div>
 
       {/* ── DEBUG PERFORMANCE CHIP ── */}

@@ -7,7 +7,7 @@ export const INITIAL_SETTINGS: ScannerSettings = {
   vibrationEnabled: true,
   detectorEngine: 'AUTO',
   roboflowApiKey: 'QhgkpEMcagyM4hkiKOVl',
-  ocrEngine: 'TESSERACT',
+  ocrEngine: 'ONNX_MODEL',
   detectionThreshold: 0.35,
   recognitionThreshold: 0.60,
   characterConfidenceThreshold: 0.55,

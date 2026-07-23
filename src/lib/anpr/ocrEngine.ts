@@ -2,6 +2,7 @@ import { createWorker, Worker } from 'tesseract.js';
 import { normalizePlate, formatDisplayPlate, generateCandidatePlates } from './normaliser';
 import { validateMalaysianPattern } from './patterns';
 import { CharacterConfidence, PlateCategory, PlateLayout } from '../db/types';
+import { recognizeWithPpOcr } from './ppOcrEngine';
 
 let workerPromise: Promise<Worker> | null = null;
 
@@ -33,26 +34,29 @@ export interface OcrRecognitionResult {
   category: PlateCategory;
   patternScore: number;
   hasTrailingSuffix: boolean;
-  engineUsed: 'ONNX_MODEL' | 'TESSERACT';
+  engineUsed: 'ONNX_MODEL' | 'PP_OCR' | 'TESSERACT';
 }
 
 /**
  * Primary OCR Router:
- * 1. Checks if an ONNX OCR Model (PP-OCR or CRNN) is available
- * 2. Fallback to Tesseract.js
+ * 1. Executes PP-OCR ONNX Model (Primary Production Engine via WebGPU/WASM)
+ * 2. Optional Fallback to Tesseract.js (only when ONNX model is unavailable)
  */
 export async function recognizePlateFromCanvas(
   cropCanvas: HTMLCanvasElement,
   isTwoLineHint?: boolean
 ): Promise<OcrRecognitionResult> {
   try {
-    // 1. Check for custom ONNX OCR model if available
-    const onnxResult = await tryOnnxOcrModel(cropCanvas);
-    if (onnxResult) {
-      return onnxResult;
+    // 1. Primary Engine: Local PP-OCR ONNX Model
+    const ppOcrResult = await recognizeWithPpOcr(cropCanvas, isTwoLineHint);
+    if (ppOcrResult && ppOcrResult.normalizedPlate) {
+      return {
+        ...ppOcrResult,
+        engineUsed: 'ONNX_MODEL',
+      };
     }
 
-    // 2. Tesseract.js Production Baseline
+    // 2. Optional Fallback Engine: Tesseract.js
     return await recognizeWithTesseract(cropCanvas, isTwoLineHint);
   } catch (err) {
     console.warn('[ANPR OcrEngine] Error in recognition router:', err);
@@ -61,7 +65,7 @@ export async function recognizePlateFromCanvas(
 }
 
 /**
- * Tesseract.js OCR engine execution with character-level details & 2-line layout handling.
+ * Tesseract.js OCR engine execution (Fallback only)
  */
 async function recognizeWithTesseract(
   cropCanvas: HTMLCanvasElement,
@@ -95,7 +99,7 @@ async function recognizeWithTesseract(
     const botText = normalizePlate(botRes.data.text || '');
     const normMerged = normalizePlate(`${topText}${botText}`);
 
-    if (normMerged && normMerged.length >= 3) {
+    if (normMerged && normMerged.length >= 2) {
       const topConf = (topRes.data.confidence || 0) / 100;
       const botConf = (botRes.data.confidence || 0) / 100;
       const avgConf = Math.min(1.0, (topConf + botConf) / 2);
@@ -170,14 +174,6 @@ async function recognizeWithTesseract(
     hasTrailingSuffix: patternVal.hasTrailingSuffix,
     engineUsed: 'TESSERACT',
   };
-}
-
-/**
- * Placeholder hook to support custom PP-OCR or CRNN ONNX models placed in /models/
- */
-async function tryOnnxOcrModel(_cropCanvas: HTMLCanvasElement): Promise<OcrRecognitionResult | null> {
-  // If an ONNX OCR model is added in /models/crnn-malaysia.onnx, execute here
-  return null;
 }
 
 function createEmptyResult(): OcrRecognitionResult {
